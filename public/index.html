@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSV to SQL Converter</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 CSV to SQL Converter</h1>
+            <p>Upload your CSV file and get instant SQL statements</p>
+        </header>
+
+        <div class="instructions">
+            <div class="instructions-header" onclick="toggleInstructions()">
+                <span>📖 How to Use</span>
+                <span id="instructionsToggle">▼</span>
+            </div>
+            <div id="instructionsContent" class="instructions-content" style="display: none;">
+                <ol>
+                    <li><strong>Upload your CSV file</strong> - Make sure it has column headers in the first row</li>
+                    <li><strong>Choose your database</strong> - Select PostgreSQL, MySQL, SQL Server, SQLite, or Oracle</li>
+                    <li><strong>Review validation results</strong> - We'll check for data quality issues</li>
+                    <li><strong>Adjust column types</strong> - Override any auto-detected types if needed</li>
+                    <li><strong>Generate SQL</strong> - Click confirm to create your SQL statements</li>
+                    <li><strong>Copy or download</strong> - Use the SQL in your database!</li>
+                </ol>
+                <div class="tips">
+                    <strong>💡 Pro Tips:</strong>
+                    <ul>
+                        <li>ZIP codes? Change from INTEGER to VARCHAR to keep leading zeros</li>
+                        <li>Boolean values? Override INTEGER to BOOLEAN for better performance</li>
+                        <li>Large text? Use TEXT instead of VARCHAR for unlimited length</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="upload-section">
+            <form id="uploadForm">
+                <div class="form-group">
+                    <label for="tableName">Table Name:</label>
+                    <input 
+                        type="text" 
+                        id="tableName" 
+                        name="tableName" 
+                        placeholder="my_table" 
+                        value="my_table"
+                    >
+                </div>
+
+                <div class="form-group">
+                    <label for="dialect">Database Type:</label>
+                    <select id="dialect" name="dialect" class="dialect-select">
+                        <option value="postgresql">PostgreSQL</option>
+                        <option value="mysql">MySQL</option>
+                        <option value="sqlserver">SQL Server</option>
+                        <option value="sqlite">SQLite</option>
+                        <option value="oracle">Oracle</option>
+                    </select>
+                    <small class="help-text">Choose your target database for optimized SQL syntax</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="csvFile">Choose CSV File:</label>
+                    <input 
+                        type="file" 
+                        id="csvFile" 
+                        name="csvFile" 
+                        accept=".csv"
+                        required
+                    >
+                    <span id="fileName" class="file-name"></span>
+                </div>
+
+                <button type="submit" id="convertBtn" class="btn-primary">
+                    Convert to SQL
+                </button>
+            </form>
+
+            <div id="loading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p id="loadingMessage">Analyzing your CSV file...</p>
+                <small id="loadingDetail"></small>
+            </div>
+        </div>
+
+        <div id="preview" class="preview-section" style="display: none;">
+            <h2>📋 Review Column Types</h2>
+            <p class="preview-subtitle">Auto-detected types are shown below. Click to change if needed.</p>
+            
+            <div id="validationResults" class="validation-results"></div>
+            
+            <div id="columnPreview" class="column-preview"></div>
+            
+            <div class="preview-actions">
+                <button onclick="confirmAndConvert()" class="btn-primary">
+                    ✓ Confirm & Generate SQL
+                </button>
+                <button onclick="cancelPreview()" class="btn-secondary">
+                    ← Back to Upload
+                </button>
+            </div>
+        </div>
+
+        <div id="results" class="results" style="display: none;">
+            <div class="stats">
+                <span id="dialectUsed"></span>
+                <span id="rowCount"></span>
+                <span id="columnCount"></span>
+            </div>
+
+            <div class="sql-section">
+                <div class="sql-header">
+                    <h3>CREATE TABLE Statement</h3>
+                    <button onclick="copyToClipboard('createTableSQL')" class="btn-copy">
+                        📋 Copy
+                    </button>
+                </div>
+                <pre id="createTableSQL" class="sql-code"></pre>
+            </div>
+
+            <div class="sql-section">
+                <div class="sql-header">
+                    <h3>INSERT Statements</h3>
+                    <button onclick="copyToClipboard('insertSQL')" class="btn-copy">
+                        📋 Copy
+                    </button>
+                </div>
+                <pre id="insertSQL" class="sql-code"></pre>
+            </div>
+
+            <div class="actions">
+                <button onclick="downloadSQL()" class="btn-secondary">
+                    💾 Download SQL File
+                </button>
+                <button onclick="reset()" class="btn-secondary">
+                    🔄 Convert Another File
+                </button>
+            </div>
+        </div>
+
+        <div id="error" class="error" style="display: none;"></div>
+    </div>
+
+    <footer class="footer">
+        <div class="footer-content">
+            <div class="footer-section">
+                <p class="footer-brand">CSV to SQL Converter</p>
+                <p class="footer-tagline">Professional data imports made simple</p>
+            </div>
+            <div class="footer-section">
+                <p><strong>Features</strong></p>
+                <p>✓ 5 Database Types</p>
+                <p>✓ Data Validation</p>
+                <p>✓ Type Control</p>
+            </div>
+            <div class="footer-section">
+                <p><strong>Feedback</strong></p>
+                <p>📧 <a href="mailto:gmbdatatools@outlook.com">gmbdatatools@outlook.com</a></p>
+                <p>💬 Found a bug? Let us know!</p>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p>Made with ❤️ for data analysts who deserve better tools</p>
+        </div>
+    </footer>
+
+    <script>
+        let currentSQL = { createTable: '', insert: '' };
+        let previewData = null; // Store preview data
+
+        // Toggle instructions
+        function toggleInstructions() {
+            const content = document.getElementById('instructionsContent');
+            const toggle = document.getElementById('instructionsToggle');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggle.textContent = '▲';
+            } else {
+                content.style.display = 'none';
+                toggle.textContent = '▼';
+            }
+        }
+
+        // Show selected file name
+        document.getElementById('csvFile').addEventListener('change', function(e) {
+            const fileName = e.target.files[0]?.name || '';
+            document.getElementById('fileName').textContent = fileName;
+        });
+
+        // Handle form submission - now shows preview first
+        document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            const fileInput = document.getElementById('csvFile');
+            
+            if (!fileInput.files[0]) {
+                showError('Please select a CSV file');
+                return;
+            }
+
+            // Show loading, hide everything else
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('loadingMessage').textContent = 'Analyzing your CSV file...';
+            document.getElementById('loadingDetail').textContent = 'Reading and parsing data';
+            document.getElementById('preview').style.display = 'none';
+            document.getElementById('results').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+
+            try {
+                // Step 1: Get preview data
+                const response = await fetch('/preview', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                document.getElementById('loadingMessage').textContent = 'Running validation checks...';
+                document.getElementById('loadingDetail').textContent = 'Checking data quality and detecting types';
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Preview failed');
+                }
+
+                document.getElementById('loadingMessage').textContent = 'Preparing preview...';
+                document.getElementById('loadingDetail').textContent = `Found ${data.rowCount} rows and ${data.columns.length} columns`;
+
+                // Store preview data
+                previewData = data;
+
+                // Display validation results
+                displayValidation(data.validation);
+
+                // Display preview
+                displayPreview(data);
+
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('preview').style.display = 'block';
+
+            } catch (error) {
+                document.getElementById('loading').style.display = 'none';
+                showError(error.message, 'upload');
+            }
+        });
+
+        // Display validation results
+        function displayValidation(validation) {
+            const container = document.getElementById('validationResults');
+            container.innerHTML = '';
+
+            if (!validation) return;
+
+            const resultsDiv = document.createElement('div');
+            resultsDiv.className = 'validation-container';
+
+            // Count totals
+            const passedCount = validation.passed.length;
+            const warningCount = validation.warnings.length;
+            const errorCount = validation.errors.length;
+
+            // Summary header
+            const summary = document.createElement('div');
+            summary.className = 'validation-summary';
+            
+            let summaryIcon = '✅';
+            let summaryClass = 'validation-success';
+            let summaryText = 'Data looks good!';
+            
+            if (errorCount > 0) {
+                summaryIcon = '❌';
+                summaryClass = 'validation-error';
+                summaryText = `Found ${errorCount} error${errorCount > 1 ? 's' : ''}`;
+            } else if (warningCount > 0) {
+                summaryIcon = '⚠️';
+                summaryClass = 'validation-warning';
+                summaryText = `Found ${warningCount} warning${warningCount > 1 ? 's' : ''}`;
+            }
+            
+            summary.className = `validation-summary ${summaryClass}`;
+            summary.innerHTML = `
+                <h3>${summaryIcon} Data Quality Check</h3>
+                <p>${summaryText}${passedCount > 0 ? ` • ${passedCount} checks passed` : ''}</p>
+            `;
+            resultsDiv.appendChild(summary);
+
+            // Create sections for errors, warnings, and passed
+            if (errorCount > 0) {
+                const errorSection = createValidationSection('Errors', validation.errors, 'error');
+                resultsDiv.appendChild(errorSection);
+            }
+
+            if (warningCount > 0) {
+                const warningSection = createValidationSection('Warnings', validation.warnings, 'warning');
+                resultsDiv.appendChild(warningSection);
+            }
+
+            if (passedCount > 0 && errorCount === 0 && warningCount === 0) {
+                const passedSection = createValidationSection('All Checks Passed', validation.passed, 'success');
+                resultsDiv.appendChild(passedSection);
+            }
+
+            container.appendChild(resultsDiv);
+        }
+
+        function createValidationSection(title, items, type) {
+            const section = document.createElement('div');
+            section.className = `validation-section validation-${type}`;
+
+            const header = document.createElement('h4');
+            header.textContent = title;
+            section.appendChild(header);
+
+            const list = document.createElement('ul');
+            list.className = 'validation-list';
+
+            items.forEach(item => {
+                const li = document.createElement('li');
+                
+                const message = document.createElement('div');
+                message.className = 'validation-message';
+                message.textContent = item.message;
+                li.appendChild(message);
+
+                if (item.details) {
+                    const details = document.createElement('div');
+                    details.className = 'validation-details';
+                    details.textContent = item.details;
+                    li.appendChild(details);
+                }
+
+                list.appendChild(li);
+            });
+
+            section.appendChild(list);
+            return section;
+        }
+
+        // Display the column preview with type dropdowns
+        function displayPreview(data) {
+            const container = document.getElementById('columnPreview');
+            container.innerHTML = '';
+
+            const table = document.createElement('table');
+            table.className = 'preview-table';
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th>Column Name</th>
+                        <th>Detected Type</th>
+                        <th>Override Type</th>
+                        <th>Sample Data</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            `;
+
+            const tbody = table.querySelector('tbody');
+
+            data.columns.forEach(col => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td><strong>${col.originalName}</strong><br><small>${col.sanitizedName}</small></td>
+                    <td><span class="type-badge">${col.detectedType}</span></td>
+                    <td>
+                        <select class="type-select" data-column="${col.sanitizedName}">
+                            <option value="${col.detectedType}" selected>Keep: ${col.detectedType}</option>
+                            <option value="INTEGER">INTEGER</option>
+                            <option value="BIGINT">BIGINT</option>
+                            <option value="DECIMAL(10,2)">DECIMAL(10,2)</option>
+                            <option value="DECIMAL(18,4)">DECIMAL(18,4)</option>
+                            <option value="VARCHAR(50)">VARCHAR(50)</option>
+                            <option value="VARCHAR(100)">VARCHAR(100)</option>
+                            <option value="VARCHAR(255)">VARCHAR(255)</option>
+                            <option value="VARCHAR(500)">VARCHAR(500)</option>
+                            <option value="TEXT">TEXT</option>
+                            <option value="DATE">DATE</option>
+                            <option value="DATETIME">DATETIME</option>
+                            <option value="TIMESTAMP">TIMESTAMP</option>
+                            <option value="BOOLEAN">BOOLEAN</option>
+                        </select>
+                    </td>
+                    <td class="sample-data">${col.sampleValues.join(', ')}</td>
+                `;
+                tbody.appendChild(row);
+            });
+
+            container.appendChild(table);
+
+            // Add row count info
+            const info = document.createElement('p');
+            info.className = 'preview-info';
+            info.textContent = `Found ${data.columns.length} columns and ${data.rowCount} rows`;
+            container.appendChild(info);
+        }
+
+        // Confirm and convert with overrides
+        async function confirmAndConvert() {
+            const tableName = document.getElementById('tableName').value || 'my_table';
+            const dialect = document.getElementById('dialect').value;
+
+            // Collect type overrides
+            const typeOverrides = {};
+            document.querySelectorAll('.type-select').forEach(select => {
+                const columnName = select.dataset.column;
+                const selectedType = select.value;
+                // Only include if user changed it
+                if (!selectedType.startsWith('Keep:')) {
+                    typeOverrides[columnName] = selectedType;
+                }
+            });
+
+            // Show loading
+            document.getElementById('preview').style.display = 'none';
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('loadingMessage').textContent = 'Generating SQL statements...';
+            document.getElementById('loadingDetail').textContent = 'Creating optimized SQL for your database';
+            document.getElementById('error').style.display = 'none';
+
+            try {
+                // Create form data with overrides
+                const formData = new FormData();
+                formData.append('tableName', tableName);
+                formData.append('dialect', dialect);
+                formData.append('tempFilePath', previewData.tempFilePath);
+                formData.append('typeOverrides', JSON.stringify(typeOverrides));
+
+                document.getElementById('loadingDetail').textContent = `Processing ${previewData.rowCount} rows...`;
+
+                const response = await fetch('/convert', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Conversion failed');
+                }
+
+                // Store SQL for download
+                currentSQL = {
+                    createTable: data.createTable,
+                    insert: data.insert
+                };
+
+                // Display results
+                document.getElementById('createTableSQL').textContent = data.createTable;
+                document.getElementById('insertSQL').textContent = data.insert;
+                
+                // Format dialect name nicely
+                const dialectNames = {
+                    'postgresql': 'PostgreSQL',
+                    'mysql': 'MySQL',
+                    'sqlserver': 'SQL Server',
+                    'sqlite': 'SQLite',
+                    'oracle': 'Oracle'
+                };
+                document.getElementById('dialectUsed').textContent = `${dialectNames[data.dialect] || data.dialect}`;
+                document.getElementById('rowCount').textContent = `${data.rowCount} rows`;
+                document.getElementById('columnCount').textContent = `${data.columnCount} columns`;
+
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('results').style.display = 'block';
+
+            } catch (error) {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('preview').style.display = 'block';
+                showError(error.message, 'conversion');
+            }
+        }
+
+        // Cancel preview and go back
+        function cancelPreview() {
+            document.getElementById('preview').style.display = 'none';
+            document.getElementById('uploadForm').reset();
+            document.getElementById('fileName').textContent = '';
+            previewData = null;
+        }
+
+        function copyToClipboard(elementId) {
+            const text = document.getElementById(elementId).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                // Show feedback
+                const btn = event.target;
+                const originalText = btn.textContent;
+                btn.textContent = '✅ Copied!';
+                btn.style.background = '#10b981';
+                
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.background = '';
+                }, 2000);
+            }).catch(err => {
+                alert('Failed to copy. Please select and copy manually.');
+            });
+        }
+
+        function downloadSQL() {
+            const content = currentSQL.createTable + '\n\n' + currentSQL.insert;
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'output.sql';
+            a.click();
+            window.URL.revokeObjectURL(url);
+        }
+
+        function reset() {
+            document.getElementById('uploadForm').reset();
+            document.getElementById('fileName').textContent = '';
+            document.getElementById('results').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+            currentSQL = { createTable: '', insert: '' };
+        }
+
+        function showError(message, context = 'general') {
+            const errorDiv = document.getElementById('error');
+            
+            // Add helpful context to errors
+            let fullMessage = '❌ ';
+            
+            if (context === 'upload') {
+                fullMessage += 'Upload Error: ';
+                if (message.includes('parsing')) {
+                    fullMessage += message + '\n\n💡 Try: Make sure your CSV has headers in the first row and is properly formatted.';
+                } else if (message.includes('columns')) {
+                    fullMessage += message + '\n\n💡 Try: Check that your CSV has column headers.';
+                } else if (message.includes('rows')) {
+                    fullMessage += message + '\n\n💡 Try: Make sure your CSV has data rows, not just headers.';
+                } else {
+                    fullMessage += message + '\n\n💡 Try: Check that your file is a valid CSV format.';
+                }
+            } else if (context === 'conversion') {
+                fullMessage += 'Conversion Error: ';
+                fullMessage += message + '\n\n💡 Try: Go back and check your settings, or contact support if the issue persists.';
+            } else {
+                fullMessage += message;
+            }
+            
+            errorDiv.textContent = fullMessage;
+            errorDiv.style.display = 'block';
+            
+            // Scroll to error
+            errorDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+    </script>
+</body>
+</html>
