@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ dest: '/tmp/uploads/' }); // Vercel uses /tmp for temp files
 
 // Parse JSON bodies
 app.use(express.json());
@@ -181,7 +181,7 @@ app.post('/preview', upload.single('csvFile'), (req, res) => {
   } catch (error) {
     console.error('Error:', error);
     if (req.file && req.file.path) {
-      fs.unlinkSync(req.file.path);
+      try { fs.unlinkSync(req.file.path); } catch(e) {}
     }
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
@@ -195,7 +195,7 @@ function runValidation(rows, headers) {
     errors: []
   };
   
-  // Check 1: Column consistency (all rows have same columns)
+  // Check 1: Column consistency
   const expectedColumns = headers.length;
   let inconsistentRows = 0;
   rows.forEach((row, idx) => {
@@ -226,7 +226,6 @@ function runValidation(rows, headers) {
     const duplicateCount = nonEmptyValues.length - uniqueValues.size;
     
     if (duplicateCount > 0) {
-      // Find which rows have duplicates
       const valueCounts = {};
       const duplicateRows = [];
       
@@ -235,11 +234,10 @@ function runValidation(rows, headers) {
           if (!valueCounts[val]) {
             valueCounts[val] = [];
           }
-          valueCounts[val].push(idx + 1); // 1-indexed for user display
+          valueCounts[val].push(idx + 1);
         }
       });
       
-      // Get examples of duplicate rows (limit to 3 examples)
       const duplicateExamples = Object.entries(valueCounts)
         .filter(([val, rows]) => rows.length > 1)
         .slice(0, 3)
@@ -280,28 +278,23 @@ function runValidation(rows, headers) {
     }
   });
   
-  // Check 4: Date format consistency
+  // Check 4: Date format consistency (fixed version)
   headers.forEach(header => {
     const values = rows.map(row => row[header]).filter(v => v !== null && v !== undefined && v !== '');
     
     if (values.length === 0) return;
     
-    // Check if column looks like it contains dates (not just parseable as dates)
-    // A real date column should have dashes, slashes, or date-like patterns
+    // Check if column looks like it contains dates
     const datePatternCount = values.filter(v => {
       const str = String(v);
-      // Look for actual date patterns: contains -, /, or words like Jan, January, etc
-      return /\d{4}[-\/]\d{1,2}[-\/]\d{1,2}/.test(str) || // YYYY-MM-DD or YYYY/MM/DD
-             /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}/.test(str) || // MM-DD-YYYY or DD-MM-YYYY
-             /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(str); // Month names
+      return /\d{4}[-\/]\d{1,2}[-\/]\d{1,2}/.test(str) || 
+             /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}/.test(str) ||
+             /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(str);
     }).length;
     
-    // Only treat as date column if >50% have actual date patterns
     if (datePatternCount > values.length * 0.5) {
-      // This looks like a date column - check for invalid dates
       const invalidDates = values.filter(v => {
         const str = String(v);
-        // Has date pattern but can't be parsed
         const hasPattern = /\d{4}[-\/]\d{1,2}[-\/]\d{1,2}/.test(str) || 
                           /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}/.test(str) ||
                           /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(str);
@@ -321,70 +314,6 @@ function runValidation(rows, headers) {
     }
   });
   
-  // Check 5: Data type inconsistency within column
-  headers.forEach(header => {
-    const values = rows.map(row => row[header]).filter(v => v !== null && v !== undefined && v !== '');
-    
-    if (values.length === 0) return;
-    
-    let numberCount = 0;
-    let textCount = 0;
-    
-    values.forEach(v => {
-      if (/^-?\d*\.?\d+$/.test(String(v).trim())) {
-        numberCount++;
-      } else {
-        textCount++;
-      }
-    });
-    
-    // If column is mixed (has both numbers and text)
-    if (numberCount > 0 && textCount > 0 && numberCount > values.length * 0.1 && textCount > values.length * 0.1) {
-      results.warnings.push({
-        type: 'mixed_types',
-        column: header,
-        message: `Column "${header}" has mixed data types (${numberCount} numbers, ${textCount} text values)`,
-        severity: 'warning'
-      });
-    }
-  });
-  
-  // Check 6: Unusually long values
-  headers.forEach(header => {
-    const values = rows.map(row => row[header]).filter(v => v !== null && v !== undefined && v !== '');
-    const maxLength = Math.max(...values.map(v => String(v).length));
-    
-    if (maxLength > 1000) {
-      results.warnings.push({
-        type: 'length',
-        column: header,
-        message: `Column "${header}" has very long values (max: ${maxLength} characters)`,
-        details: 'Consider using TEXT type instead of VARCHAR',
-        severity: 'info'
-      });
-    }
-  });
-  
-  // Check 7: Suspicious values (common issues)
-  headers.forEach(header => {
-    const values = rows.map(row => row[header]).filter(v => v !== null && v !== undefined && v !== '');
-    
-    // Check for common placeholder values
-    const placeholders = ['N/A', 'n/a', 'null', 'NULL', 'None', 'none', '#N/A', 'TBD', 'tbd'];
-    const placeholderCount = values.filter(v => placeholders.includes(String(v).trim())).length;
-    
-    if (placeholderCount > 0) {
-      results.warnings.push({
-        type: 'placeholders',
-        column: header,
-        message: `Column "${header}" has ${placeholderCount} placeholder values (N/A, null, etc.)`,
-        details: 'These will be treated as text, not NULL values',
-        severity: 'info'
-      });
-    }
-  });
-  
-  // Summary check - if no issues found
   if (results.warnings.length === 0 && results.errors.length === 0) {
     results.passed.push({
       type: 'overall',
@@ -403,19 +332,18 @@ function escapeSQLValue(value, dataType) {
   
   const str = String(value).trim();
   
-  if (dataType === 'INTEGER') {
+  if (dataType === 'INTEGER' || dataType === 'INT' || dataType === 'NUMBER') {
     return str;
   }
   
-  if (dataType.startsWith('DECIMAL')) {
+  if (dataType.startsWith('DECIMAL') || dataType.startsWith('NUMERIC') || dataType === 'REAL') {
     return str;
   }
   
-  // For strings and dates, escape single quotes
   return `'${str.replace(/'/g, "''")}'`;
 }
 
-// Main endpoint to convert CSV to SQL (with optional type overrides)
+// Main endpoint to convert CSV to SQL
 app.post('/convert', upload.single('csvFile'), (req, res) => {
   try {
     const tableName = req.body.tableName || 'my_table';
@@ -424,27 +352,24 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     
     let filePath;
     
-    // Check if this is from preview (using temp file) or direct upload
     if (req.body.tempFilePath) {
-      filePath = path.join('uploads', req.body.tempFilePath);
+      filePath = path.join('/tmp/uploads', req.body.tempFilePath);
     } else if (req.file) {
       filePath = req.file.path;
     } else {
       return res.status(400).json({ error: 'No file provided' });
     }
     
-    // Read the uploaded file
     const csvData = fs.readFileSync(filePath, 'utf8');
     
-    // Parse CSV
     const parsed = Papa.parse(csvData, {
       header: true,
       skipEmptyLines: true,
-      dynamicTyping: false // Keep as strings for type detection
+      dynamicTyping: false
     });
     
     if (parsed.errors.length > 0) {
-      fs.unlinkSync(filePath); // Clean up
+      try { fs.unlinkSync(filePath); } catch(e) {}
       return res.status(400).json({ error: 'Error parsing CSV: ' + parsed.errors[0].message });
     }
     
@@ -452,32 +377,28 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     const headers = parsed.meta.fields;
     
     if (!headers || headers.length === 0) {
-      fs.unlinkSync(filePath);
+      try { fs.unlinkSync(filePath); } catch(e) {}
       return res.status(400).json({ error: 'No columns found in CSV' });
     }
     
     if (rows.length === 0) {
-      fs.unlinkSync(filePath);
+      try { fs.unlinkSync(filePath); } catch(e) {}
       return res.status(400).json({ error: 'No data rows found in CSV' });
     }
     
-    // Detect data types for each column (or use overrides)
     const columnTypes = {};
     headers.forEach(header => {
       const sanitizedName = sanitizeColumnName(header);
       
-      // Check if user provided an override for this column
       if (typeOverrides[sanitizedName]) {
         columnTypes[header] = convertToDialect(typeOverrides[sanitizedName], dialect);
       } else {
-        // Auto-detect
         const columnValues = rows.map(row => row[header]);
         const genericType = detectDataType(columnValues);
         columnTypes[header] = convertToDialect(genericType, dialect);
       }
     });
     
-    // Generate CREATE TABLE statement with dialect-specific syntax
     const sanitizedTableName = sanitizeColumnName(tableName);
     let createTableSQL = `CREATE TABLE ${sanitizedTableName} (\n`;
     
@@ -490,15 +411,13 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     createTableSQL += columnDefinitions.join(',\n');
     createTableSQL += '\n)';
     
-    // Add dialect-specific table options
     if (dialect === 'mysql') {
       createTableSQL += ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
     }
     createTableSQL += ';';
     
-    // Generate INSERT statements
     let insertSQL = '';
-    const batchSize = 100; // Insert 100 rows at a time
+    const batchSize = 100;
     
     for (let i = 0; i < rows.length; i += batchSize) {
       const batch = rows.slice(i, i + batchSize);
@@ -519,10 +438,8 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
       insertSQL += ';\n\n';
     }
     
-    // Clean up uploaded file
-    fs.unlinkSync(filePath);
+    try { fs.unlinkSync(filePath); } catch(e) {}
     
-    // Return the SQL
     res.json({
       createTable: createTableSQL,
       insert: insertSQL,
@@ -534,24 +451,19 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
   } catch (error) {
     console.error('Error:', error);
     if (req.file && req.file.path) {
-      fs.unlinkSync(req.file.path);
+      try { fs.unlinkSync(req.file.path); } catch(e) {}
     }
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
-// Create uploads directory if it doesn't exist
-if (!fs.existsSync('uploads')) {
-  fs.mkdirSync('uploads');
+// For local development
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`🚀 CSV to SQL Converter running at http://localhost:${PORT}`);
+  });
 }
 
-// Create public directory if it doesn't exist
-if (!fs.existsSync('public')) {
-  fs.mkdirSync('public');
-}
-
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 CSV to SQL Converter running at http://localhost:${PORT}`);
-  console.log(`📁 Upload a CSV file and get SQL statements instantly!`);
-});
+// Export for Vercel
+module.exports = app;
