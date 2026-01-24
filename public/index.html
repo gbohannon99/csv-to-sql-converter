@@ -159,7 +159,7 @@
             </div>
             <div class="footer-section">
                 <p><strong>Feedback</strong></p>
-                <p>📧 <a href="mailto:gmbdatatools@outlook.com">gmbdatatools@outlook.com</a></p>
+                <p>📧 <a href="mailto:feedback@csvtosql.app">feedback@csvtosql.app</a></p>
                 <p>💬 Found a bug? Let us know!</p>
             </div>
         </div>
@@ -485,20 +485,59 @@
 
         function copyToClipboard(elementId) {
             const text = document.getElementById(elementId).textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                // Show feedback
-                const btn = event.target;
-                const originalText = btn.textContent;
-                btn.textContent = '✅ Copied!';
-                btn.style.background = '#10b981';
+            const btn = event.target;
+            const originalText = btn.textContent;
+            
+            // Try modern clipboard API first
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(() => {
+                    btn.textContent = '✅ Copied!';
+                    btn.style.background = '#10b981';
+                    
+                    setTimeout(() => {
+                        btn.textContent = originalText;
+                        btn.style.background = '';
+                    }, 2000);
+                }).catch(err => {
+                    // Fallback to old method
+                    fallbackCopy(text, btn, originalText);
+                });
+            } else {
+                // Use fallback immediately if clipboard API not available
+                fallbackCopy(text, btn, originalText);
+            }
+        }
+        
+        function fallbackCopy(text, btn, originalText) {
+            // Create temporary textarea
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            
+            try {
+                textarea.select();
+                textarea.setSelectionRange(0, 99999); // For mobile
                 
-                setTimeout(() => {
-                    btn.textContent = originalText;
-                    btn.style.background = '';
-                }, 2000);
-            }).catch(err => {
-                alert('Failed to copy. Please select and copy manually.');
-            });
+                const successful = document.execCommand('copy');
+                
+                if (successful) {
+                    btn.textContent = '✅ Copied!';
+                    btn.style.background = '#10b981';
+                    
+                    setTimeout(() => {
+                        btn.textContent = originalText;
+                        btn.style.background = '';
+                    }, 2000);
+                } else {
+                    alert('Copy failed. Please select the text and copy manually (Ctrl+C or Cmd+C)');
+                }
+            } catch (err) {
+                alert('Copy failed. Please select the text and copy manually (Ctrl+C or Cmd+C)');
+            } finally {
+                document.body.removeChild(textarea);
+            }
         }
 
         function downloadSQL() {
