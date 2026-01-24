@@ -1,6 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <!-- Google Analytics -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-ER3HJ8CM7M"></script>
+    <script>
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){dataLayer.push(arguments);}
+        gtag('js', new Date());
+        gtag('config', 'G-ER3HJ8CM7M');
+    </script>
+    
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CSV to SQL Converter</title>
@@ -465,6 +474,15 @@
                 document.getElementById('rowCount').textContent = `${data.rowCount} rows`;
                 document.getElementById('columnCount').textContent = `${data.columnCount} columns`;
 
+                // Track conversion in Google Analytics
+                if (typeof gtag !== 'undefined') {
+                    gtag('event', 'conversion', {
+                        'database': data.dialect,
+                        'row_count': data.rowCount,
+                        'column_count': data.columnCount
+                    });
+                }
+
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('results').style.display = 'block';
 
@@ -549,6 +567,13 @@
             a.download = 'output.sql';
             a.click();
             window.URL.revokeObjectURL(url);
+            
+            // Track download in Google Analytics
+            if (typeof gtag !== 'undefined') {
+                gtag('event', 'download', {
+                    'file_type': 'sql'
+                });
+            }
         }
 
         function reset() {
