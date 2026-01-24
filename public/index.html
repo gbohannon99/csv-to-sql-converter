@@ -74,6 +74,10 @@
 
                 <div class="form-group">
                     <label for="csvFile">Choose CSV File:</label>
+                    <label for="csvFile" class="file-upload-label">
+                        <span id="uploadText">📁 Drop CSV file here or click to browse</span>
+                        <span id="fileName" class="file-name"></span>
+                    </label>
                     <input 
                         type="file" 
                         id="csvFile" 
@@ -81,11 +85,10 @@
                         accept=".csv"
                         required
                     >
-                    <span id="fileName" class="file-name"></span>
                 </div>
 
                 <button type="submit" id="convertBtn" class="btn-primary">
-                    Convert to SQL
+                    → Convert to SQL
                 </button>
             </form>
 
