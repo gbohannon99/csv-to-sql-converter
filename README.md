@@ -2,10 +2,6 @@
 
 > Professional CSV to SQL conversion tool with comprehensive data validation and multi-database support.
 
-[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen)](https://csv-to-sql-converter-tau.vercel.app)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-
 [**Live Demo**](https://csv-to-sql-converter-tau.vercel.app) | [Report Bug](https://github.com/gbohannon99/csv-to-sql-converter/issues) | [Request Feature](https://github.com/gbohannon99/csv-to-sql-converter/issues)
 
 ---
