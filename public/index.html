@@ -193,7 +193,7 @@
             </div>
             <div class="footer-section">
                 <p><strong>Feedback</strong></p>
-                <p>📧 <a href="mailto:feedback@csvtosql.app">Your Email Here</a></p>
+                <p>📧 <a href="/cdn-cgi/l/email-protection#a0c6c5c5c4c2c1c3cbe0c3d3d6d4cfd3d1cc8ec1d0d0">Your Email Here</a></p>
                 <p>💬 Found a bug? Let us know!</p>
             </div>
         </div>
@@ -202,7 +202,7 @@
         </div>
     </footer>
 
-    <script>
+    <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
         let currentSQL = { createTable: '', insert: '' };
         let previewData = null; // Store preview data
 
@@ -635,10 +635,47 @@
             
             errorDiv.textContent = fullMessage;
             errorDiv.style.display = 'block';
-            
+           
             // Scroll to error
-            errorDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            errorDiv.scrollIntoView({ behavior: "smooth", block: "center" });
         }
+
+        function toggleInstructions() {
+            const content = document.getElementById("instructionsContent");
+            const toggle = document.getElementById("instructionsToggle");
+            if (content.style.display === "none") {
+                content.style.display = "block";
+                toggle.textContent = "▲";
+            } else {
+                content.style.display = "none";
+                toggle.textContent = "▼";
+            }
+        }
+        
+        // Large file warning handler
+        document.getElementById("csvFile").addEventListener("change", function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const fileSizeMB = (file.size / 1024 / 1024).toFixed(2);
+                document.getElementById("uploadText").textContent = `📁 ${file.name}`;
+                document.getElementById("fileName").textContent = `${fileSizeMB} MB`;
+                
+                // Remove existing warning if any
+                const existingWarning = document.querySelector(".warning-message");
+                if (existingWarning) existingWarning.remove();
+                
+                // Warn about large files
+                if (file.size > 10 * 1024 * 1024) {
+                    const warningDiv = document.createElement("div");
+                    warningDiv.className = "warning-message";
+                    warningDiv.style.cssText = "background: #1b1910; border-left: 4px solid #d29922; padding: 12px; margin: 10px 0; border-radius: 6px; color: #d29922; font-size: 0.9em;";
+                    warningDiv.textContent = `⚠️ Large file detected (${fileSizeMB}MB). Processing may take 20-30 seconds.`;
+                    
+                    const uploadSection = document.querySelector(".upload-section");
+                    uploadSection.insertBefore(warningDiv, uploadSection.firstChild);
+                }
+            }
+        });
     </script>
 </body>
 </html>
