@@ -2,9 +2,9 @@
   "name": "csv-to-sql-converter",
   "version": "1.0.0",
   "description": "Professional CSV to SQL converter with validation and multi-database support",
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node index.js",
     "dev": "node server.js"
   },
   "keywords": ["csv", "sql", "converter", "database", "data"],
