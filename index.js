@@ -205,8 +205,11 @@ app.post('/preview', upload.single('csvFile'), async (req, res) => {
     
     const validationResults = runValidation(rows, headers);
     
-    // Count actual total rows in file
+    // Get actual row count from file
     const totalLines = csvData.split('\n').length - 1; // Subtract header
+    
+    // IMPORTANT: Don't delete temp file - we need it for conversion
+    // fs.unlinkSync(filePath); // REMOVED - keep file for convert endpoint
     
     res.json({
       columns: columns,
