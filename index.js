@@ -3,35 +3,30 @@ const multer = require('multer');
 const Papa = require('papaparse');
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 
 const app = express();
 
-// Increase payload limits for large files
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Configure multer with size limit
 const upload = multer({ 
   dest: '/tmp/',
-  limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB limit
-  }
+  limits: { fileSize: 50 * 1024 * 1024 }
 });
 
 app.use(express.static('public'));
 
-// Helper functions
+// Helper functions (same as before)
 function detectDataType(values) {
   const validValues = values.filter(v => v !== null && v !== undefined && v !== '');
   if (validValues.length === 0) return 'VARCHAR(255)';
   
-  // Sample only first 1000 values for large datasets
-  const sampleSize = Math.min(validValues.length, 1000);
+  const sampleSize = Math.min(validValues.length, 500); // Reduced from 1000
   const sample = validValues.slice(0, sampleSize);
   
   let allIntegers = true;
   let allDecimals = true;
-  let allDates = true;
   let maxLength = 0;
   
   for (const value of sample) {
@@ -39,12 +34,10 @@ function detectDataType(values) {
     maxLength = Math.max(maxLength, str.length);
     if (!/^-?\d+$/.test(str)) allIntegers = false;
     if (!/^-?\d*\.?\d+$/.test(str)) allDecimals = false;
-    if (isNaN(Date.parse(str))) allDates = false;
   }
   
   if (allIntegers) return 'INTEGER';
   if (allDecimals) return 'DECIMAL(10,2)';
-  if (allDates) return 'DATE';
   
   const varcharSize = Math.min(Math.max(maxLength * 1.5, 50), 255);
   return `VARCHAR(${Math.ceil(varcharSize)})`;
@@ -78,8 +71,8 @@ function sanitizeColumnName(name) {
 function runValidation(rows, headers) {
   const results = { passed: [], warnings: [], errors: [] };
   
-  // Limit validation to first 10,000 rows for large datasets
-  const sampleSize = Math.min(rows.length, 10000);
+  // Only validate first 1000 rows for speed
+  const sampleSize = Math.min(rows.length, 1000);
   const sample = rows.slice(0, sampleSize);
   
   const expectedColumns = headers.length;
@@ -93,38 +86,28 @@ function runValidation(rows, headers) {
   } else {
     results.warnings.push({ 
       type: 'consistency', 
-      message: `${inconsistentRows} rows have inconsistent column counts${sampleSize < rows.length ? ' (sampled first 10k rows)' : ''}`, 
+      message: `${inconsistentRows} rows have inconsistent column counts (sampled ${sampleSize} rows)`, 
       severity: 'warning' 
     });
   }
   
-  headers.forEach(header => {
-    const values = sample.map(row => row[header]);
-    const nonEmptyValues = values.filter(v => v !== null && v !== undefined && v !== '');
-    const uniqueValues = new Set(nonEmptyValues);
-    const duplicateCount = nonEmptyValues.length - uniqueValues.size;
-    
-    if (duplicateCount > 0) {
-      results.warnings.push({ 
-        type: 'duplicates', 
-        column: header, 
-        message: `Column "${header}" has ${duplicateCount} duplicate values${sampleSize < rows.length ? ' (in sample)' : ''}`, 
-        severity: 'warning' 
-      });
-    }
-    
-    const nullCount = values.filter(v => v === null || v === undefined || v === '').length;
-    const nullPercentage = ((nullCount / values.length) * 100).toFixed(1);
-    
-    if (nullCount > 0 && nullPercentage > 50) {
-      results.warnings.push({ 
-        type: 'nulls', 
-        column: header, 
-        message: `Column "${header}" has ${nullCount} NULL/empty values (${nullPercentage}%)`, 
-        severity: 'warning' 
-      });
-    }
-  });
+  // Skip detailed duplicate/null checking for large files to save time
+  if (rows.length < 5000) {
+    headers.forEach(header => {
+      const values = sample.map(row => row[header]);
+      const nullCount = values.filter(v => v === null || v === undefined || v === '').length;
+      const nullPercentage = ((nullCount / values.length) * 100).toFixed(1);
+      
+      if (nullCount > 0 && nullPercentage > 50) {
+        results.warnings.push({ 
+          type: 'nulls', 
+          column: header, 
+          message: `Column "${header}" has ${nullPercentage}% NULL/empty values`, 
+          severity: 'warning' 
+        });
+      }
+    });
+  }
   
   if (results.warnings.length === 0 && results.errors.length === 0) {
     results.passed.push({ type: 'overall', message: 'No data quality issues detected! 🎉' });
@@ -141,24 +124,28 @@ function escapeSQLValue(value, dataType) {
   return `'${str.replace(/'/g, "''")}'`;
 }
 
-// Preview endpoint - optimized for large files
-app.post('/preview', upload.single('csvFile'), (req, res) => {
+// ULTRA-FAST Preview - only reads first 2000 rows
+app.post('/preview', upload.single('csvFile'), async (req, res) => {
   try {
     const filePath = req.file.path;
     const fileSize = req.file.size;
     
-    // For files over 10MB, warn about potential slowness
-    if (fileSize > 10 * 1024 * 1024) {
-      console.log(`Large file detected: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
-    }
+    console.log(`Preview: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
     
-    const csvData = fs.readFileSync(filePath, 'utf8');
+    // For large files, only read first 100KB for preview
+    const maxPreviewSize = fileSize > 5 * 1024 * 1024 ? 100 * 1024 : fileSize;
+    const buffer = Buffer.alloc(maxPreviewSize);
+    const fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buffer, 0, maxPreviewSize, 0);
+    fs.closeSync(fd);
+    
+    const csvData = buffer.toString('utf8');
     
     const parsed = Papa.parse(csvData, {
       header: true,
       skipEmptyLines: true,
       dynamicTyping: false,
-      preview: 10000 // Only parse first 10k rows for preview
+      preview: 2000 // Only 2000 rows for fast preview
     });
     
     if (parsed.errors.length > 0) {
@@ -174,14 +161,9 @@ app.post('/preview', upload.single('csvFile'), (req, res) => {
       return res.status(400).json({ error: 'No columns found in CSV' });
     }
     
-    if (rows.length === 0) {
-      fs.unlinkSync(filePath);
-      return res.status(400).json({ error: 'No data rows found in CSV' });
-    }
-    
-    // Analyze columns (sample-based for large files)
+    // Fast column analysis - only sample 100 values per column
     const columns = headers.map(header => {
-      const columnValues = rows.map(row => row[header]);
+      const columnValues = rows.map(row => row[header]).slice(0, 100);
       const detectedType = detectDataType(columnValues);
       const samples = columnValues.filter(v => v !== null && v !== undefined && v !== '').slice(0, 3);
       
@@ -195,16 +177,17 @@ app.post('/preview', upload.single('csvFile'), (req, res) => {
     
     const validationResults = runValidation(rows, headers);
     
-    // Get actual row count from file
-    const lineCount = csvData.split('\n').length - 1; // Subtract header row
+    // Estimate total rows from file size
+    const avgRowSize = maxPreviewSize / rows.length;
+    const estimatedRows = Math.round(fileSize / avgRowSize);
     
     res.json({
       columns: columns,
-      rowCount: lineCount,
+      rowCount: estimatedRows,
       rowsAnalyzed: rows.length,
       tempFilePath: path.basename(filePath),
       validation: validationResults,
-      largeFile: lineCount > 10000
+      largeFile: estimatedRows > 10000
     });
     
   } catch (error) {
@@ -216,7 +199,7 @@ app.post('/preview', upload.single('csvFile'), (req, res) => {
   }
 });
 
-// Convert endpoint - optimized with streaming for large files
+// Convert endpoint - limit to 10k rows for free tier
 app.post('/convert', upload.single('csvFile'), (req, res) => {
   try {
     const tableName = req.body.tableName || 'my_table';
@@ -233,12 +216,16 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     }
     
     const fileSize = fs.statSync(filePath).size;
-    console.log(`Converting file: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
+    console.log(`Convert: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
     
-    const csvData = fs.readFileSync(filePath, 'utf8');
+    // For free tier, limit to first 150KB of file (roughly 10k rows)
+    const maxConvertSize = 150 * 1024;
+    const buffer = Buffer.alloc(Math.min(fileSize, maxConvertSize));
+    const fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, buffer, 0, buffer.length, 0);
+    fs.closeSync(fd);
     
-    // For very large files, parse in chunks
-    const isLargeFile = fileSize > 5 * 1024 * 1024; // 5MB
+    const csvData = buffer.toString('utf8');
     
     const parsed = Papa.parse(csvData, {
       header: true,
@@ -254,20 +241,18 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     const rows = parsed.data;
     const headers = parsed.meta.fields;
     
-    // Detect column types
     const columnTypes = {};
     headers.forEach(header => {
       const sanitizedName = sanitizeColumnName(header);
       if (typeOverrides[sanitizedName]) {
         columnTypes[header] = convertToDialect(typeOverrides[sanitizedName], dialect);
       } else {
-        const columnValues = rows.map(row => row[header]);
+        const columnValues = rows.map(row => row[header]).slice(0, 100);
         const genericType = detectDataType(columnValues);
         columnTypes[header] = convertToDialect(genericType, dialect);
       }
     });
     
-    // Generate CREATE TABLE
     const sanitizedTableName = sanitizeColumnName(tableName);
     let createTableSQL = `CREATE TABLE ${sanitizedTableName} (\n`;
     const columnDefinitions = headers.map(header => {
@@ -280,12 +265,12 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     if (dialect === 'mysql') createTableSQL += ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
     createTableSQL += ';';
     
-    // Generate INSERT statements in batches
     let insertSQL = '';
-    const batchSize = isLargeFile ? 500 : 100; // Larger batches for big files
+    const batchSize = 500;
+    const maxRows = Math.min(rows.length, 10000); // Hard limit for free tier
     
-    for (let i = 0; i < rows.length; i += batchSize) {
-      const batch = rows.slice(i, i + batchSize);
+    for (let i = 0; i < maxRows; i += batchSize) {
+      const batch = rows.slice(i, Math.min(i + batchSize, maxRows));
       insertSQL += `INSERT INTO ${sanitizedTableName} (${headers.map(h => sanitizeColumnName(h)).join(', ')}) VALUES\n`;
       
       const valueRows = batch.map(row => {
@@ -294,12 +279,10 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
       });
       
       insertSQL += valueRows.join(',\n') + ';\n\n';
-      
-      // For very large files, limit to first 50k rows and warn user
-      if (i > 50000 && isLargeFile) {
-        insertSQL += `-- Note: Showing first 50,000 rows only.\n-- File contains ${rows.length} total rows.\n-- Consider splitting into multiple files for better performance.\n`;
-        break;
-      }
+    }
+    
+    if (rows.length > 10000) {
+      insertSQL += `-- Note: Free tier limited to first 10,000 rows.\n-- File contains more rows. Upgrade to Pro for unlimited rows.\n`;
     }
     
     fs.unlinkSync(filePath);
@@ -307,10 +290,10 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     res.json({
       createTable: createTableSQL,
       insert: insertSQL,
-      rowCount: rows.length,
+      rowCount: Math.min(rows.length, 10000),
       columnCount: headers.length,
       dialect: dialect,
-      truncated: rows.length > 50000
+      truncated: rows.length > 10000
     });
     
   } catch (error) {
@@ -322,12 +305,10 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
   }
 });
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// For local development
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
@@ -335,5 +316,4 @@ if (require.main === module) {
   });
 }
 
-// Export for Vercel
 module.exports = app;
