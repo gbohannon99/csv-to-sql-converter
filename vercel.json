@@ -3,17 +3,14 @@
   "builds": [
     {
       "src": "index.js",
-      "use": "@vercel/node",
-      "config": {
-        "maxDuration": 30
-      }
-    },
-    {
-      "src": "public/**",
-      "use": "@vercel/static"
+      "use": "@vercel/node"
     }
   ],
   "routes": [
+    {
+      "src": "/(.*\\.(css|js|html|png|jpg|jpeg|gif|svg|ico))",
+      "dest": "/public/$1"
+    },
     {
       "src": "/preview",
       "dest": "/index.js"
@@ -24,13 +21,7 @@
     },
     {
       "src": "/(.*)",
-      "dest": "/public/$1"
+      "dest": "/public/index.html"
     }
-  ],
-  "functions": {
-    "index.js": {
-      "maxDuration": 30,
-      "memory": 1024
-    }
-  }
+  ]
 }
