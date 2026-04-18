@@ -15,7 +15,6 @@ app.use(express.static('public'));
 
 // Function to detect SQL data type from sample values (generic type)
 function detectDataType(values) {
-  // Remove null/empty values
   const validValues = values.filter(v => v !== null && v !== undefined && v !== '');
   
   if (validValues.length === 0) return 'VARCHAR(255)';
@@ -25,24 +24,16 @@ function detectDataType(values) {
   let allDates = true;
   let maxLength = 0;
   
+  // Strict date regex: YYYY-MM-DD with valid month/day ranges
+  const strictDateRegex = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
   for (const value of validValues) {
     const str = String(value).trim();
     maxLength = Math.max(maxLength, str.length);
     
-    // Check if integer
-    if (!/^-?\d+$/.test(str)) {
-      allIntegers = false;
-    }
-    
-    // Check if decimal/float
-    if (!/^-?\d*\.?\d+$/.test(str)) {
-      allDecimals = false;
-    }
-    
-    // Check if date
-    if (isNaN(Date.parse(str))) {
-      allDates = false;
-    }
+    if (!/^-?\d+$/.test(str)) allIntegers = false;
+    if (!/^-?\d*\.?\d+$/.test(str)) allDecimals = false;
+    if (!strictDateRegex.test(str)) allDates = false;
   }
   
   if (allIntegers) return 'INTEGER';
@@ -119,11 +110,11 @@ function sanitizeColumnName(name) {
 app.post('/preview', upload.single('csvFile'), (req, res) => {
   try {
     const filePath = req.file.path;
-    
-    // Read the uploaded file
     const csvData = fs.readFileSync(filePath, 'utf8');
     
-    // Parse CSV
+    // Clean up temp file immediately — we return the data in the response
+    try { fs.unlinkSync(filePath); } catch(e) {}
+
     const parsed = Papa.parse(csvData, {
       header: true,
       skipEmptyLines: true,
@@ -131,7 +122,6 @@ app.post('/preview', upload.single('csvFile'), (req, res) => {
     });
     
     if (parsed.errors.length > 0) {
-      fs.unlinkSync(filePath);
       return res.status(400).json({ error: 'Error parsing CSV: ' + parsed.errors[0].message });
     }
     
@@ -139,25 +129,17 @@ app.post('/preview', upload.single('csvFile'), (req, res) => {
     const headers = parsed.meta.fields;
     
     if (!headers || headers.length === 0) {
-      fs.unlinkSync(filePath);
       return res.status(400).json({ error: 'No columns found in CSV' });
     }
     
     if (rows.length === 0) {
-      fs.unlinkSync(filePath);
       return res.status(400).json({ error: 'No data rows found in CSV' });
     }
     
-    // Analyze each column
     const columns = headers.map(header => {
       const columnValues = rows.map(row => row[header]);
       const detectedType = detectDataType(columnValues);
-      
-      // Get sample values (first 3 non-empty)
-      const samples = columnValues
-        .filter(v => v !== null && v !== undefined && v !== '')
-        .slice(0, 3);
-      
+      const samples = columnValues.filter(v => v !== null && v !== undefined && v !== '').slice(0, 3);
       return {
         originalName: header,
         sanitizedName: sanitizeColumnName(header),
@@ -166,23 +148,20 @@ app.post('/preview', upload.single('csvFile'), (req, res) => {
       };
     });
     
-    // Run validation checks
     const validationResults = runValidation(rows, headers);
     
-    // Keep the file temporarily - we'll need it for the actual conversion
-    // Store the file path in the response so frontend can send it back
+    // Return rows + headers in response so convert doesn't need the temp file
     res.json({
-      columns: columns,
+      columns,
       rowCount: rows.length,
-      tempFilePath: path.basename(filePath),
+      headers,       // needed by convert
+      rows,          // needed by convert
       validation: validationResults
     });
     
   } catch (error) {
     console.error('Error:', error);
-    if (req.file && req.file.path) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
-    }
+    if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch(e) {} }
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
@@ -241,51 +220,58 @@ function checkBoolean(values, header) {
   const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '').map(v => String(v).toLowerCase().trim());
   if (nonEmpty.length === 0) return null;
   const unique = new Set(nonEmpty);
-  // Only flag if all unique values look like a boolean set
-  const matchedSet = BOOL_SETS.find(s => [...unique].every(v => s.has(v)));
-  if (!matchedSet) return null;
-  // Check for mixed representations (e.g. both "1"/"0" and "true"/"false" in same column)
-  const allSets = BOOL_SETS.filter(s => [...unique].every(v => s.has(v)));
-  if (allSets.length === BOOL_SETS.length) return null; // single value like "0" matches all - skip
-  const representations = new Set(nonEmpty);
-  if (representations.size <= 2) return null; // clean, consistent
+
+  // Must have more than 2 unique values to be "mixed" — a clean true/false column is fine
+  if (unique.size <= 2) return null;
+
+  // Check if ALL unique values belong to any single bool vocabulary
+  const matchedSets = BOOL_SETS.filter(s => [...unique].every(v => s.has(v)));
+  // If no single set covers all values, check if values span MULTIPLE bool sets (mixed representations)
+  const anyBoolValue = [...unique].every(v => BOOL_SETS.some(s => s.has(v)));
+  if (!anyBoolValue) return null; // not a boolean column at all
+
   return {
     type: 'boolean',
     column: header,
     message: `Column "${header}" appears boolean but has mixed representations`,
-    details: `Found values: ${[...representations].slice(0,6).map(v=>`"${v}"`).join(', ')}`,
+    details: `Found values: ${[...unique].slice(0, 6).map(v => `"${v}"`).join(', ')}`,
     severity: 'warning',
     fixable: true,
     fixType: 'normalize_bool'
   };
 }
 
-// Mixed date format check
+// Strict date formats — validate month and day ranges, not just shape
 const DATE_FORMATS = [
-  { regex: /^\d{4}-\d{2}-\d{2}$/, name: 'YYYY-MM-DD' },
-  { regex: /^\d{2}\/\d{2}\/\d{4}$/, name: 'DD/MM/YYYY' },
+  { regex: /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/, name: 'YYYY-MM-DD' },
+  { regex: /^(0[1-9]|[12]\d|3[01])\/(0[1-9]|1[0-2])\/\d{4}$/, name: 'DD/MM/YYYY' },
   { regex: /^\d{1,2}\/\d{1,2}\/\d{4}$/, name: 'M/D/YYYY' },
-  { regex: /^\d{2}-\d{2}-\d{4}$/, name: 'DD-MM-YYYY' },
-  { regex: /^\d{4}\/\d{2}\/\d{2}$/, name: 'YYYY/MM/DD' },
+  { regex: /^(0[1-9]|[12]\d|3[01])-(0[1-9]|1[0-2])-\d{4}$/, name: 'DD-MM-YYYY' },
+  { regex: /^\d{4}\/(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])$/, name: 'YYYY/MM/DD' },
 ];
+
+// Loose pattern: looks date-like by shape but may have invalid month/day numbers
+const looseDatePattern = /^\d{4}-\d{2}-\d{2}$|^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$|^\d{4}[\/]\d{2}[\/]\d{2}$/;
 
 function checkDateFormats(values, header) {
   const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '');
   if (nonEmpty.length === 0) return [];
 
-  const isDateLike = nonEmpty.filter(v => DATE_FORMATS.some(f => f.regex.test(String(v).trim()))).length;
-  if (isDateLike < nonEmpty.length * 0.4) return []; // not a date column
+  // Count how many look date-like by loose shape
+  const looseLike = nonEmpty.filter(v => looseDatePattern.test(String(v).trim())).length;
+  if (looseLike < nonEmpty.length * 0.4) return []; // not a date column
 
   const formatCounts = {};
-  const unrecognized = [];
+  const invalidValues = []; // matches loose pattern but fails strict validation
 
   nonEmpty.forEach(v => {
     const str = String(v).trim();
+    if (!looseDatePattern.test(str)) return; // not date-shaped at all
     const match = DATE_FORMATS.find(f => f.regex.test(str));
     if (match) {
       formatCounts[match.name] = (formatCounts[match.name] || 0) + 1;
     } else {
-      unrecognized.push(str);
+      invalidValues.push(str); // date-shaped but invalid month/day numbers
     }
   });
 
@@ -302,12 +288,12 @@ function checkDateFormats(values, header) {
     });
   }
 
-  if (unrecognized.length > 0 && isDateLike > 0) {
+  if (invalidValues.length > 0) {
     issues.push({
       type: 'invalid_date',
       column: header,
-      message: `Column "${header}" has ${unrecognized.length} unparseable date value(s)`,
-      details: `Examples: ${unrecognized.slice(0,3).map(v=>`"${v}"`).join(', ')}`,
+      message: `Column "${header}" has ${invalidValues.length} invalid date value(s)`,
+      details: `Examples: ${invalidValues.slice(0, 3).map(v => `"${v}"`).join(', ')}`,
       severity: 'error'
     });
   }
@@ -435,52 +421,21 @@ function escapeSQLValue(value, dataType) {
 }
 
 // Main endpoint to convert CSV to SQL
-app.post('/convert', upload.single('csvFile'), (req, res) => {
+app.post('/convert', (req, res) => {
   try {
     const tableName = req.body.tableName || 'my_table';
     const dialect = req.body.dialect || 'postgresql';
     const typeOverrides = req.body.typeOverrides ? JSON.parse(req.body.typeOverrides) : {};
-    
-    let filePath;
-    
-    if (req.body.tempFilePath) {
-      filePath = path.join('/tmp/uploads', req.body.tempFilePath);
-    } else if (req.file) {
-      filePath = req.file.path;
-    } else {
-      return res.status(400).json({ error: 'No file provided' });
+    const rows = req.body.rows;
+    const headers = req.body.headers;
+
+    if (!rows || !headers || rows.length === 0) {
+      return res.status(400).json({ error: 'No data provided' });
     }
-    
-    const csvData = fs.readFileSync(filePath, 'utf8');
-    
-    const parsed = Papa.parse(csvData, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: false
-    });
-    
-    if (parsed.errors.length > 0) {
-      try { fs.unlinkSync(filePath); } catch(e) {}
-      return res.status(400).json({ error: 'Error parsing CSV: ' + parsed.errors[0].message });
-    }
-    
-    const rows = parsed.data;
-    const headers = parsed.meta.fields;
-    
-    if (!headers || headers.length === 0) {
-      try { fs.unlinkSync(filePath); } catch(e) {}
-      return res.status(400).json({ error: 'No columns found in CSV' });
-    }
-    
-    if (rows.length === 0) {
-      try { fs.unlinkSync(filePath); } catch(e) {}
-      return res.status(400).json({ error: 'No data rows found in CSV' });
-    }
-    
+
     const columnTypes = {};
     headers.forEach(header => {
       const sanitizedName = sanitizeColumnName(header);
-      
       if (typeOverrides[sanitizedName]) {
         columnTypes[header] = convertToDialect(typeOverrides[sanitizedName], dialect);
       } else {
@@ -492,19 +447,14 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     
     const sanitizedTableName = sanitizeColumnName(tableName);
     let createTableSQL = `CREATE TABLE ${sanitizedTableName} (\n`;
-    
     const columnDefinitions = headers.map(header => {
       const sanitizedCol = sanitizeColumnName(header);
       const dataType = columnTypes[header];
       return `  ${sanitizedCol} ${dataType}`;
     });
-    
     createTableSQL += columnDefinitions.join(',\n');
     createTableSQL += '\n)';
-    
-    if (dialect === 'mysql') {
-      createTableSQL += ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
-    }
+    if (dialect === 'mysql') createTableSQL += ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
     createTableSQL += ';';
     
     let insertSQL = '';
@@ -512,24 +462,16 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     
     for (let i = 0; i < rows.length; i += batchSize) {
       const batch = rows.slice(i, i + batchSize);
-      
       insertSQL += `INSERT INTO ${sanitizedTableName} (`;
       insertSQL += headers.map(h => sanitizeColumnName(h)).join(', ');
       insertSQL += ') VALUES\n';
-      
       const valueRows = batch.map(row => {
-        const values = headers.map(header => {
-          const dataType = columnTypes[header];
-          return escapeSQLValue(row[header], dataType);
-        });
+        const values = headers.map(header => escapeSQLValue(row[header], columnTypes[header]));
         return `  (${values.join(', ')})`;
       });
-      
       insertSQL += valueRows.join(',\n');
       insertSQL += ';\n\n';
     }
-    
-    try { fs.unlinkSync(filePath); } catch(e) {}
     
     res.json({
       createTable: createTableSQL,
@@ -541,9 +483,6 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     
   } catch (error) {
     console.error('Error:', error);
-    if (req.file && req.file.path) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
-    }
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });

@@ -27,17 +27,23 @@ function detectDataType(values) {
   
   let allIntegers = true;
   let allDecimals = true;
+  let allDates = true;
   let maxLength = 0;
+
+  // Strict date regex: YYYY-MM-DD with valid month/day ranges only
+  const strictDateRegex = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
   
   for (const value of sample) {
     const str = String(value).trim();
     maxLength = Math.max(maxLength, str.length);
     if (!/^-?\d+$/.test(str)) allIntegers = false;
     if (!/^-?\d*\.?\d+$/.test(str)) allDecimals = false;
+    if (!strictDateRegex.test(str)) allDates = false;
   }
   
   if (allIntegers) return 'INTEGER';
   if (allDecimals) return 'DECIMAL(10,2)';
+  if (allDates) return 'DATE';
   
   const varcharSize = Math.min(Math.max(maxLength * 1.5, 50), 255);
   return `VARCHAR(${Math.ceil(varcharSize)})`;
@@ -94,29 +100,39 @@ function checkBoolean(values, header) {
   const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '').map(v => String(v).toLowerCase().trim());
   if (nonEmpty.length === 0) return null;
   const unique = new Set(nonEmpty);
-  const matchedSet = BOOL_SETS.find(s => [...unique].every(v => s.has(v)));
-  if (!matchedSet || unique.size <= 2) return null;
+  if (unique.size <= 2) return null; // clean, consistent — no issue
+  // Flag only if every unique value belongs to some boolean vocabulary
+  const anyBoolValue = [...unique].every(v => BOOL_SETS.some(s => s.has(v)));
+  if (!anyBoolValue) return null;
   return { type: 'boolean', column: header, message: `Column "${header}" appears boolean but has mixed representations`, details: `Found values: ${[...unique].slice(0,6).map(v=>`"${v}"`).join(', ')}`, severity: 'warning', fixable: true, fixType: 'normalize_bool' };
 }
 
 const DATE_FORMATS = [
-  { regex: /^\d{4}-\d{2}-\d{2}$/, name: 'YYYY-MM-DD' },
-  { regex: /^\d{2}\/\d{2}\/\d{4}$/, name: 'DD/MM/YYYY' },
+  { regex: /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/, name: 'YYYY-MM-DD' },
+  { regex: /^(0[1-9]|[12]\d|3[01])\/(0[1-9]|1[0-2])\/\d{4}$/, name: 'DD/MM/YYYY' },
   { regex: /^\d{1,2}\/\d{1,2}\/\d{4}$/, name: 'M/D/YYYY' },
-  { regex: /^\d{2}-\d{2}-\d{4}$/, name: 'DD-MM-YYYY' },
-  { regex: /^\d{4}\/\d{2}\/\d{2}$/, name: 'YYYY/MM/DD' },
+  { regex: /^(0[1-9]|[12]\d|3[01])-(0[1-9]|1[0-2])-\d{4}$/, name: 'DD-MM-YYYY' },
+  { regex: /^\d{4}\/(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])$/, name: 'YYYY/MM/DD' },
 ];
+
+const looseDatePattern = /^\d{4}-\d{2}-\d{2}$|^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$|^\d{4}[\/]\d{2}[\/]\d{2}$/;
 
 function checkDateFormats(values, header) {
   const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '');
   if (nonEmpty.length === 0) return [];
-  const isDateLike = nonEmpty.filter(v => DATE_FORMATS.some(f => f.regex.test(String(v).trim()))).length;
-  if (isDateLike < nonEmpty.length * 0.4) return [];
-  const formatCounts = {}; const unrecognized = [];
-  nonEmpty.forEach(v => { const str = String(v).trim(); const match = DATE_FORMATS.find(f => f.regex.test(str)); if (match) formatCounts[match.name]=(formatCounts[match.name]||0)+1; else unrecognized.push(str); });
+  const looseLike = nonEmpty.filter(v => looseDatePattern.test(String(v).trim())).length;
+  if (looseLike < nonEmpty.length * 0.4) return [];
+  const formatCounts = {}; const invalidValues = [];
+  nonEmpty.forEach(v => {
+    const str = String(v).trim();
+    if (!looseDatePattern.test(str)) return;
+    const match = DATE_FORMATS.find(f => f.regex.test(str));
+    if (match) formatCounts[match.name]=(formatCounts[match.name]||0)+1;
+    else invalidValues.push(str);
+  });
   const issues = []; const formatNames = Object.keys(formatCounts);
   if (formatNames.length > 1) issues.push({ type: 'mixed_date_format', column: header, message: `Column "${header}" has mixed date formats`, details: `Formats found: ${formatNames.map(f=>`${f} (${formatCounts[f]})`).join(', ')}`, severity: 'warning' });
-  if (unrecognized.length > 0 && isDateLike > 0) issues.push({ type: 'invalid_date', column: header, message: `Column "${header}" has ${unrecognized.length} unparseable date value(s)`, details: `Examples: ${unrecognized.slice(0,3).map(v=>`"${v}"`).join(', ')}`, severity: 'error' });
+  if (invalidValues.length > 0) issues.push({ type: 'invalid_date', column: header, message: `Column "${header}" has ${invalidValues.length} invalid date value(s)`, details: `Examples: ${invalidValues.slice(0,3).map(v=>`"${v}"`).join(', ')}`, severity: 'error' });
   return issues;
 }
 
@@ -163,143 +179,91 @@ function escapeSQLValue(value, dataType) {
   return `'${str.replace(/'/g, "''")}'`;
 }
 
-// FIXED Preview - reads complete rows, not partial buffer
+// Preview - parse CSV and return data in response (no temp file dependency)
 app.post('/preview', upload.single('csvFile'), async (req, res) => {
   try {
     const filePath = req.file.path;
     const fileSize = req.file.size;
-    
     console.log(`Preview: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
     
-    // Read entire file for files under 10MB, otherwise read first 2000 complete rows
     let csvData;
-    
     if (fileSize < 10 * 1024 * 1024) {
-      // Small file - read all
       csvData = fs.readFileSync(filePath, 'utf8');
     } else {
-      // Large file - read first N complete lines
       const lines = [];
       const fileStream = fs.createReadStream(filePath);
-      const rl = readline.createInterface({
-        input: fileStream,
-        crlfDelay: Infinity
-      });
-      
+      const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
       let lineCount = 0;
       for await (const line of rl) {
         lines.push(line);
         lineCount++;
-        if (lineCount >= 2001) break; // Header + 2000 rows
+        if (lineCount >= 2001) break;
       }
-      
       csvData = lines.join('\n');
       rl.close();
       fileStream.destroy();
     }
+
+    // Clean up temp file immediately
+    try { fs.unlinkSync(filePath); } catch(e) {}
     
-    const parsed = Papa.parse(csvData, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: false,
-      preview: 2000
-    });
+    const parsed = Papa.parse(csvData, { header: true, skipEmptyLines: true, dynamicTyping: false });
     
     if (parsed.errors.length > 0) {
-      fs.unlinkSync(filePath);
       return res.status(400).json({ error: 'Error parsing CSV: ' + parsed.errors[0].message });
     }
     
     const rows = parsed.data;
     const headers = parsed.meta.fields;
     
-    if (!headers || headers.length === 0) {
-      fs.unlinkSync(filePath);
-      return res.status(400).json({ error: 'No columns found in CSV' });
-    }
+    if (!headers || headers.length === 0) return res.status(400).json({ error: 'No columns found in CSV' });
     
-    // Fast column analysis
     const columns = headers.map(header => {
-      const columnValues = rows.map(row => row[header]).slice(0, 100);
+      const columnValues = rows.map(row => row[header]);
       const detectedType = detectDataType(columnValues);
       const samples = columnValues.filter(v => v !== null && v !== undefined && v !== '').slice(0, 3);
-      
-      return {
-        originalName: header,
-        sanitizedName: sanitizeColumnName(header),
-        detectedType: detectedType,
-        sampleValues: samples
-      };
+      return { originalName: header, sanitizedName: sanitizeColumnName(header), detectedType, sampleValues: samples };
     });
     
     const validationResults = runValidation(rows, headers);
     
-    // Get actual row count from file
-    const totalLines = csvData.split('\n').length - 1; // Subtract header
-    
-    // IMPORTANT: Don't delete temp file - we need it for conversion
-    // fs.unlinkSync(filePath); // REMOVED - keep file for convert endpoint
-    
     res.json({
-      columns: columns,
-      rowCount: totalLines,
-      rowsAnalyzed: rows.length,
-      tempFilePath: path.basename(filePath),
+      columns,
+      rowCount: rows.length,
+      headers,    // passed back on convert
+      rows,       // passed back on convert
       validation: validationResults,
-      largeFile: totalLines > 10000
+      largeFile: rows.length > 10000
     });
     
   } catch (error) {
     console.error('Preview error:', error);
-    if (req.file?.path) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
-    }
+    if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch(e) {} }
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
 
-// Convert endpoint - limit to 10k rows for free tier
-app.post('/convert', upload.single('csvFile'), (req, res) => {
+// Convert endpoint - accepts rows/headers as JSON (no temp file needed)
+app.post('/convert', (req, res) => {
   try {
     const tableName = req.body.tableName || 'my_table';
     const dialect = req.body.dialect || 'postgresql';
     const typeOverrides = req.body.typeOverrides ? JSON.parse(req.body.typeOverrides) : {};
-    
-    let filePath;
-    if (req.body.tempFilePath) {
-      filePath = path.join('/tmp', req.body.tempFilePath);
-    } else if (req.file) {
-      filePath = req.file.path;
-    } else {
-      return res.status(400).json({ error: 'No file provided' });
+    const rows = req.body.rows;
+    const headers = req.body.headers;
+
+    if (!rows || !headers || rows.length === 0) {
+      return res.status(400).json({ error: 'No data provided' });
     }
-    
-    const fileSize = fs.statSync(filePath).size;
-    console.log(`Convert: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
-    
-    const csvData = fs.readFileSync(filePath, 'utf8');
-    
-    const parsed = Papa.parse(csvData, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: false
-    });
-    
-    if (parsed.errors.length > 0) {
-      fs.unlinkSync(filePath);
-      return res.status(400).json({ error: 'Error parsing CSV: ' + parsed.errors[0].message });
-    }
-    
-    const rows = parsed.data;
-    const headers = parsed.meta.fields;
-    
+
+    const maxRows = Math.min(rows.length, 10000);
     const columnTypes = {};
     headers.forEach(header => {
       const sanitizedName = sanitizeColumnName(header);
       if (typeOverrides[sanitizedName]) {
         columnTypes[header] = convertToDialect(typeOverrides[sanitizedName], dialect);
       } else {
-        const columnValues = rows.map(row => row[header]).slice(0, 100);
+        const columnValues = rows.map(row => row[header]);
         const genericType = detectDataType(columnValues);
         columnTypes[header] = convertToDialect(genericType, dialect);
       }
@@ -307,53 +271,35 @@ app.post('/convert', upload.single('csvFile'), (req, res) => {
     
     const sanitizedTableName = sanitizeColumnName(tableName);
     let createTableSQL = `CREATE TABLE ${sanitizedTableName} (\n`;
-    const columnDefinitions = headers.map(header => {
-      const sanitizedCol = sanitizeColumnName(header);
-      const dataType = columnTypes[header];
-      return `  ${sanitizedCol} ${dataType}`;
-    });
-    createTableSQL += columnDefinitions.join(',\n');
-    createTableSQL += '\n)';
+    const columnDefinitions = headers.map(header => `  ${sanitizeColumnName(header)} ${columnTypes[header]}`);
+    createTableSQL += columnDefinitions.join(',\n') + '\n)';
     if (dialect === 'mysql') createTableSQL += ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
     createTableSQL += ';';
     
     let insertSQL = '';
     const batchSize = 500;
-    const maxRows = Math.min(rows.length, 10000); // Hard limit for free tier
-    
     for (let i = 0; i < maxRows; i += batchSize) {
       const batch = rows.slice(i, Math.min(i + batchSize, maxRows));
       insertSQL += `INSERT INTO ${sanitizedTableName} (${headers.map(h => sanitizeColumnName(h)).join(', ')}) VALUES\n`;
-      
-      const valueRows = batch.map(row => {
-        const values = headers.map(header => escapeSQLValue(row[header], columnTypes[header]));
-        return `  (${values.join(', ')})`;
-      });
-      
-      insertSQL += valueRows.join(',\n') + ';\n\n';
+      insertSQL += batch.map(row => `  (${headers.map(h => escapeSQLValue(row[h], columnTypes[h])).join(', ')})`).join(',\n') + ';\n\n';
     }
     
     if (rows.length > 10000) {
-      insertSQL += `-- Note: Free tier limited to first 10,000 rows.\n-- Your file contains ${rows.length.toLocaleString()} rows.\n-- Upgrade to Pro for files up to 500,000 rows.\n`;
+      insertSQL += `-- Note: Free tier limited to first 10,000 rows.\n-- Your file contains ${rows.length.toLocaleString()} rows.\n`;
     }
-    
-    fs.unlinkSync(filePath);
     
     res.json({
       createTable: createTableSQL,
       insert: insertSQL,
-      rowCount: Math.min(rows.length, 10000),
+      rowCount: maxRows,
       columnCount: headers.length,
-      dialect: dialect,
+      dialect,
       truncated: rows.length > 10000,
       actualRows: rows.length
     });
     
   } catch (error) {
     console.error('Convert error:', error);
-    if (req.file?.path) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
-    }
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });

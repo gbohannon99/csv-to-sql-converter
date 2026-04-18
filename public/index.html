@@ -451,13 +451,11 @@
             document.querySelectorAll('.type-select').forEach(select => {
                 const columnName = select.dataset.column;
                 const selectedType = select.value;
-                // Only include if user changed it
                 if (!selectedType.startsWith('Keep:')) {
                     typeOverrides[columnName] = selectedType;
                 }
             });
 
-            // Show loading
             document.getElementById('preview').style.display = 'none';
             document.getElementById('loading').style.display = 'block';
             document.getElementById('loadingMessage').textContent = 'Generating SQL statements...';
@@ -465,18 +463,16 @@
             document.getElementById('error').style.display = 'none';
 
             try {
-                // Create form data with overrides
-                const formData = new FormData();
-                formData.append('tableName', tableName);
-                formData.append('dialect', dialect);
-                formData.append('tempFilePath', previewData.tempFilePath);
-                formData.append('typeOverrides', JSON.stringify(typeOverrides));
-
-                document.getElementById('loadingDetail').textContent = `Processing ${previewData.rowCount} rows...`;
-
                 const response = await fetch('/convert', {
                     method: 'POST',
-                    body: formData
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        tableName,
+                        dialect,
+                        typeOverrides,
+                        rows: previewData.rows,
+                        headers: previewData.headers
+                    })
                 });
 
                 const data = await response.json();
