@@ -40,13 +40,14 @@
                 <div class="tips">
                     <strong>🔍 What We Validate:</strong>
                     <ul>
+                        <li><strong>Duplicate Headers</strong> - Flags columns with the same name</li>
                         <li><strong>Column Consistency</strong> - All rows have the same number of columns</li>
-                        <li><strong>Duplicate Detection</strong> - Finds duplicate values in each column</li>
+                        <li><strong>Whitespace Detection</strong> - Flags leading/trailing spaces on values</li>
                         <li><strong>NULL Analysis</strong> - Counts missing/empty values per column</li>
-                        <li><strong>Date Format Check</strong> - Validates date columns for invalid formats</li>
-                        <li><strong>Mixed Type Detection</strong> - Identifies columns with inconsistent data types</li>
-                        <li><strong>Length Analysis</strong> - Warns about unusually long values</li>
-                        <li><strong>Placeholder Detection</strong> - Finds N/A, null, TBD text values</li>
+                        <li><strong>Boolean Consistency</strong> - Detects mixed true/false, 0/1, Y/N representations</li>
+                        <li><strong>Mixed Date Formats</strong> - Catches YYYY-MM-DD vs DD/MM/YYYY in the same column</li>
+                        <li><strong>Invalid Dates</strong> - Flags unparseable date values</li>
+                        <li><strong>Problem Row Report</strong> - Highlights rows most likely to break your INSERT</li>
                     </ul>
                 </div>
                 
@@ -189,10 +190,12 @@
             </div>
             <div class="footer-section">
                 <p><strong>Validations</strong></p>
-                <p>→ Duplicates</p>
-                <p>→ Invalid Dates</p>
+                <p>→ Duplicate Headers</p>
+                <p>→ Whitespace Detection</p>
+                <p>→ Invalid/Mixed Dates</p>
                 <p>→ NULL Analysis</p>
-                <p>→ Type Consistency</p>
+                <p>→ Boolean Consistency</p>
+                <p>→ Problem Row Report</p>
             </div>
             <div class="footer-section">
                 <p><strong>Feedback</strong></p>
@@ -296,50 +299,51 @@
             const resultsDiv = document.createElement('div');
             resultsDiv.className = 'validation-container';
 
-            // Count totals
-            const passedCount = validation.passed.length;
-            const warningCount = validation.warnings.length;
-            const errorCount = validation.errors.length;
+            const passedCount = validation.passed ? validation.passed.length : 0;
+            const warningCount = validation.warnings ? validation.warnings.length : 0;
+            const errorCount = validation.errors ? validation.errors.length : 0;
+            const infoCount = validation.info ? validation.info.length : 0;
 
             // Summary header
-            const summary = document.createElement('div');
-            summary.className = 'validation-summary';
-            
             let summaryIcon = '✅';
             let summaryClass = 'validation-success';
             let summaryText = 'Data looks good!';
-            
             if (errorCount > 0) {
-                summaryIcon = '❌';
-                summaryClass = 'validation-error';
-                summaryText = `Found ${errorCount} error${errorCount > 1 ? 's' : ''}`;
+                summaryIcon = '❌'; summaryClass = 'validation-error';
+                summaryText = `${errorCount} error${errorCount > 1 ? 's' : ''}`;
+                if (warningCount > 0) summaryText += `, ${warningCount} warning${warningCount > 1 ? 's' : ''}`;
             } else if (warningCount > 0) {
-                summaryIcon = '⚠️';
-                summaryClass = 'validation-warning';
-                summaryText = `Found ${warningCount} warning${warningCount > 1 ? 's' : ''}`;
+                summaryIcon = '⚠️'; summaryClass = 'validation-warning';
+                summaryText = `${warningCount} warning${warningCount > 1 ? 's' : ''}`;
             }
-            
+
+            const summary = document.createElement('div');
             summary.className = `validation-summary ${summaryClass}`;
             summary.innerHTML = `
                 <h3>${summaryIcon} Data Quality Check</h3>
-                <p>${summaryText}${passedCount > 0 ? ` • ${passedCount} checks passed` : ''}</p>
+                <p>${summaryText}${passedCount > 0 ? ` &bull; ${passedCount} check${passedCount>1?'s':''} passed` : ''}${infoCount > 0 ? ` &bull; ${infoCount} info note${infoCount>1?'s':''}` : ''}</p>
             `;
             resultsDiv.appendChild(summary);
 
-            // Create sections for errors, warnings, and passed
-            if (errorCount > 0) {
-                const errorSection = createValidationSection('Errors', validation.errors, 'error');
-                resultsDiv.appendChild(errorSection);
-            }
+            if (errorCount > 0) resultsDiv.appendChild(createValidationSection('Errors', validation.errors, 'error'));
+            if (warningCount > 0) resultsDiv.appendChild(createValidationSection('Warnings', validation.warnings, 'warning'));
+            if (infoCount > 0) resultsDiv.appendChild(createValidationSection('Info', validation.info, 'info'));
+            if (passedCount > 0 && errorCount === 0 && warningCount === 0) resultsDiv.appendChild(createValidationSection('All Checks Passed', validation.passed, 'success'));
 
-            if (warningCount > 0) {
-                const warningSection = createValidationSection('Warnings', validation.warnings, 'warning');
-                resultsDiv.appendChild(warningSection);
-            }
-
-            if (passedCount > 0 && errorCount === 0 && warningCount === 0) {
-                const passedSection = createValidationSection('All Checks Passed', validation.passed, 'success');
-                resultsDiv.appendChild(passedSection);
+            // Summary report: bad rows
+            if (validation.summary && validation.summary.badRows && validation.summary.badRows.length > 0) {
+                const badSection = document.createElement('div');
+                badSection.className = 'validation-section validation-warning';
+                badSection.innerHTML = `<h4>⚠️ Rows Likely to Break INSERT (first ${validation.summary.badRows.length} shown)</h4>`;
+                const ul = document.createElement('ul');
+                ul.className = 'validation-list';
+                validation.summary.badRows.forEach(r => {
+                    const li = document.createElement('li');
+                    li.innerHTML = `<div class="validation-message">Row ${r.rowNum}</div><div class="validation-details">${r.problems.join(' &bull; ')}</div>`;
+                    ul.appendChild(li);
+                });
+                badSection.appendChild(ul);
+                resultsDiv.appendChild(badSection);
             }
 
             container.appendChild(resultsDiv);

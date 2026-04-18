@@ -68,61 +68,90 @@ function sanitizeColumnName(name) {
   return name.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^(\d)/, '_$1').substring(0, 64);
 }
 
+// ── Phase 1 helpers ──────────────────────────────────────────────────────────
+
+function checkWhitespace(values, header) {
+  const issues = values.filter(v => v !== null && v !== undefined && v !== '' && String(v) !== String(v).trim());
+  return issues.length > 0 ? { type: 'whitespace', column: header, message: `Column "${header}" has ${issues.length} value(s) with leading/trailing whitespace`, details: `Examples: ${issues.slice(0,3).map(v=>`"${v}"`).join(', ')}`, severity: 'warning', fixable: true, fixType: 'trim' } : null;
+}
+
+function checkDuplicateHeaders(headers) {
+  const seen = {}; const dupes = [];
+  headers.forEach(h => { const lower = h.toLowerCase().trim(); seen[lower] = (seen[lower]||0)+1; if (seen[lower]===2) dupes.push(h); });
+  return dupes;
+}
+
+function checkNulls(values, header) {
+  const nullCount = values.filter(v => v === null || v === undefined || v === '').length;
+  if (nullCount === 0) return null;
+  const pct = ((nullCount/values.length)*100).toFixed(1);
+  return { type: 'nulls', column: header, message: `Column "${header}" has ${nullCount} NULL/empty value(s) (${pct}%)`, severity: pct > 50 ? 'warning' : 'info' };
+}
+
+const BOOL_SETS = [new Set(['true','false']),new Set(['0','1']),new Set(['y','n']),new Set(['yes','no']),new Set(['t','f'])];
+
+function checkBoolean(values, header) {
+  const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '').map(v => String(v).toLowerCase().trim());
+  if (nonEmpty.length === 0) return null;
+  const unique = new Set(nonEmpty);
+  const matchedSet = BOOL_SETS.find(s => [...unique].every(v => s.has(v)));
+  if (!matchedSet || unique.size <= 2) return null;
+  return { type: 'boolean', column: header, message: `Column "${header}" appears boolean but has mixed representations`, details: `Found values: ${[...unique].slice(0,6).map(v=>`"${v}"`).join(', ')}`, severity: 'warning', fixable: true, fixType: 'normalize_bool' };
+}
+
+const DATE_FORMATS = [
+  { regex: /^\d{4}-\d{2}-\d{2}$/, name: 'YYYY-MM-DD' },
+  { regex: /^\d{2}\/\d{2}\/\d{4}$/, name: 'DD/MM/YYYY' },
+  { regex: /^\d{1,2}\/\d{1,2}\/\d{4}$/, name: 'M/D/YYYY' },
+  { regex: /^\d{2}-\d{2}-\d{4}$/, name: 'DD-MM-YYYY' },
+  { regex: /^\d{4}\/\d{2}\/\d{2}$/, name: 'YYYY/MM/DD' },
+];
+
+function checkDateFormats(values, header) {
+  const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '');
+  if (nonEmpty.length === 0) return [];
+  const isDateLike = nonEmpty.filter(v => DATE_FORMATS.some(f => f.regex.test(String(v).trim()))).length;
+  if (isDateLike < nonEmpty.length * 0.4) return [];
+  const formatCounts = {}; const unrecognized = [];
+  nonEmpty.forEach(v => { const str = String(v).trim(); const match = DATE_FORMATS.find(f => f.regex.test(str)); if (match) formatCounts[match.name]=(formatCounts[match.name]||0)+1; else unrecognized.push(str); });
+  const issues = []; const formatNames = Object.keys(formatCounts);
+  if (formatNames.length > 1) issues.push({ type: 'mixed_date_format', column: header, message: `Column "${header}" has mixed date formats`, details: `Formats found: ${formatNames.map(f=>`${f} (${formatCounts[f]})`).join(', ')}`, severity: 'warning' });
+  if (unrecognized.length > 0 && isDateLike > 0) issues.push({ type: 'invalid_date', column: header, message: `Column "${header}" has ${unrecognized.length} unparseable date value(s)`, details: `Examples: ${unrecognized.slice(0,3).map(v=>`"${v}"`).join(', ')}`, severity: 'error' });
+  return issues;
+}
+
+function buildSummaryReport(rows, headers, allIssues) {
+  const colSummary = {};
+  allIssues.forEach(issue => { if (issue.column) { if (!colSummary[issue.column]) colSummary[issue.column]=[]; colSummary[issue.column].push(issue.type); } });
+  const badRows = [];
+  rows.slice(0,5000).forEach((row,idx) => {
+    const problems = [];
+    headers.forEach(h => { const v=row[h]; if (v===null||v===undefined||v==='') problems.push(`${h}: NULL`); else if (String(v)!==String(v).trim()) problems.push(`${h}: whitespace`); });
+    if (problems.length >= Math.ceil(headers.length*0.3)) badRows.push({ rowNum: idx+2, problems: problems.slice(0,4) });
+  });
+  return { colSummary, badRows: badRows.slice(0,5) };
+}
+
 function runValidation(rows, headers) {
-  const results = { passed: [], warnings: [], errors: [] };
-  
-  const sampleSize = Math.min(rows.length, 1000);
-  const sample = rows.slice(0, sampleSize);
-  
-  const expectedColumns = headers.length;
-  let inconsistentRows = 0;
-  sample.forEach(row => {
-    if (Object.keys(row).length !== expectedColumns) inconsistentRows++;
-  });
-  
-  if (inconsistentRows === 0) {
-    results.passed.push({ type: 'consistency', message: 'All rows have consistent column count' });
-  } else {
-    results.warnings.push({ 
-      type: 'consistency', 
-      message: `${inconsistentRows} rows have inconsistent column counts (sampled ${sampleSize} rows)`, 
-      severity: 'warning' 
-    });
-  }
-  
-  // Check for duplicates in sample
+  const results = { passed: [], warnings: [], errors: [], info: [], summary: null };
+  const dupeHeaders = checkDuplicateHeaders(headers);
+  if (dupeHeaders.length > 0) results.errors.push({ type: 'duplicate_headers', message: `Duplicate column headers detected: ${dupeHeaders.map(h=>`"${h}"`).join(', ')}`, severity: 'error' });
+  else results.passed.push({ type: 'headers', message: 'No duplicate column headers' });
+  const expectedColumns = headers.length; let inconsistentRows = 0;
+  rows.forEach(row => { if (Object.keys(row).length !== expectedColumns) inconsistentRows++; });
+  if (inconsistentRows === 0) results.passed.push({ type: 'consistency', message: 'All rows have consistent column count' });
+  else results.warnings.push({ type: 'consistency', message: `${inconsistentRows} row(s) have inconsistent column counts`, severity: 'warning' });
+  const allIssues = [];
   headers.forEach(header => {
-    const values = sample.map(row => row[header]);
-    const nonEmptyValues = values.filter(v => v !== null && v !== undefined && v !== '');
-    const uniqueValues = new Set(nonEmptyValues);
-    const duplicateCount = nonEmptyValues.length - uniqueValues.size;
-    
-    if (duplicateCount > 0) {
-      results.warnings.push({ 
-        type: 'duplicates', 
-        column: header, 
-        message: `Column "${header}" has ${duplicateCount} duplicate values in sample`, 
-        severity: 'warning' 
-      });
-    }
-    
-    const nullCount = values.filter(v => v === null || v === undefined || v === '').length;
-    const nullPercentage = ((nullCount / values.length) * 100).toFixed(1);
-    
-    if (nullCount > 0 && nullPercentage > 50) {
-      results.warnings.push({ 
-        type: 'nulls', 
-        column: header, 
-        message: `Column "${header}" has ${nullPercentage}% NULL/empty values`, 
-        severity: 'warning' 
-      });
-    }
+    const values = rows.map(row => row[header]);
+    const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '');
+    const wsIssue = checkWhitespace(nonEmpty, header); if (wsIssue) { results.warnings.push(wsIssue); allIssues.push(wsIssue); }
+    const nullIssue = checkNulls(values, header); if (nullIssue) { if (nullIssue.severity==='warning') results.warnings.push(nullIssue); else results.info.push(nullIssue); allIssues.push(nullIssue); }
+    const boolIssue = checkBoolean(nonEmpty, header); if (boolIssue) { results.warnings.push(boolIssue); allIssues.push(boolIssue); }
+    const dateIssues = checkDateFormats(nonEmpty, header); dateIssues.forEach(issue => { if (issue.severity==='error') results.errors.push(issue); else results.warnings.push(issue); allIssues.push(issue); });
   });
-  
-  if (results.warnings.length === 0 && results.errors.length === 0) {
-    results.passed.push({ type: 'overall', message: 'No data quality issues detected! 🎉' });
-  }
-  
+  results.summary = buildSummaryReport(rows, headers, allIssues);
+  if (results.warnings.length===0 && results.errors.length===0) results.passed.push({ type: 'overall', message: 'No data quality issues detected! 🎉' });
   return results;
 }
 

@@ -377,9 +377,21 @@ input[type="file"] {
     color: #d29922;
 }
 
-.validation-success h4 {
-    color: #3fb950;
+.validation-info {
+    background: #0d1526;
+    border-left: 4px solid #58a6ff;
 }
+
+.validation-info h4 {
+    color: #58a6ff;
+}
+
+.validation-info .validation-list li {
+    background: #0d1526;
+    border-left-color: #58a6ff;
+}
+
+
 
 .validation-list {
     list-style: none;
