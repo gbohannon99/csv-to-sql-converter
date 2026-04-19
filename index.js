@@ -248,7 +248,7 @@ app.post('/convert', (req, res) => {
   try {
     const tableName = req.body.tableName || 'my_table';
     const dialect = req.body.dialect || 'postgresql';
-    const typeOverrides = req.body.typeOverrides ? JSON.parse(req.body.typeOverrides) : {};
+    const typeOverrides = req.body.typeOverrides || {};
     const rows = req.body.rows;
     const headers = req.body.headers;
 
