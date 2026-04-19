@@ -7,8 +7,9 @@ const path = require('path');
 const app = express();
 const upload = multer({ dest: '/tmp/uploads/' }); // Vercel uses /tmp for temp files
 
-// Parse JSON bodies
-app.use(express.json());
+// Parse JSON bodies - 50mb limit to handle CSV row data passed from preview
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Serve static files from public directory
 app.use(express.static('public'));
