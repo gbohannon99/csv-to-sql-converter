@@ -441,12 +441,86 @@
             container.appendChild(info);
         }
 
-        // Confirm and convert with overrides
-        async function confirmAndConvert() {
+        // ── Client-side SQL generation helpers ───────────────────────────────
+
+        function clientSanitizeName(name) {
+            return name.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^(\d)/, '_$1').substring(0, 64);
+        }
+
+        function clientEscapeValue(value, dataType) {
+            if (value === null || value === undefined || value === '') return 'NULL';
+            const str = String(value).trim();
+            if (dataType === 'INTEGER' || dataType === 'INT' || dataType === 'NUMBER') return str;
+            if (dataType.startsWith('DECIMAL') || dataType.startsWith('NUMERIC') || dataType === 'REAL') return str;
+            return `'${str.replace(/'/g, "''")}'`;
+        }
+
+        function clientConvertToDialect(genericType, dialect) {
+            const typeMap = {
+                postgresql: { 'INTEGER': 'INTEGER', 'DECIMAL(10,2)': 'NUMERIC(10,2)', 'DATE': 'DATE' },
+                mysql:      { 'INTEGER': 'INT',     'DECIMAL(10,2)': 'DECIMAL(10,2)', 'DATE': 'DATE' },
+                sqlserver:  { 'INTEGER': 'INT',     'DECIMAL(10,2)': 'DECIMAL(10,2)', 'DATE': 'DATE' },
+                sqlite:     { 'INTEGER': 'INTEGER', 'DECIMAL(10,2)': 'REAL',          'DATE': 'TEXT' },
+                oracle:     { 'INTEGER': 'NUMBER',  'DECIMAL(10,2)': 'NUMBER(10,2)',  'DATE': 'DATE' },
+            };
+            const map = typeMap[dialect] || typeMap.postgresql;
+            if (genericType.startsWith('VARCHAR')) {
+                const size = genericType.match(/\((\d+)\)/)?.[1] || '255';
+                if (dialect === 'oracle') return `VARCHAR2(${size})`;
+                if (dialect === 'sqlite') return 'TEXT';
+                return `VARCHAR(${size})`;
+            }
+            return map[genericType] || genericType;
+        }
+
+        function generateSQLClientSide(tableName, dialect, typeOverrides, headers, rows) {
+            const sanitizedTable = clientSanitizeName(tableName);
+            const maxRows = Math.min(rows.length, 10000);
+
+            // Resolve final column types
+            const columnTypes = {};
+            headers.forEach(header => {
+                const sanitized = clientSanitizeName(header);
+                if (typeOverrides[sanitized]) {
+                    columnTypes[header] = clientConvertToDialect(typeOverrides[sanitized], dialect);
+                } else {
+                    // Use the detected type from preview (stored in previewData.columns)
+                    const col = previewData.columns.find(c => c.originalName === header);
+                    const genericType = col ? col.detectedType : 'VARCHAR(255)';
+                    columnTypes[header] = clientConvertToDialect(genericType, dialect);
+                }
+            });
+
+            // CREATE TABLE
+            const colDefs = headers.map(h => `  ${clientSanitizeName(h)} ${columnTypes[h]}`).join(',\n');
+            let createTable = `CREATE TABLE ${sanitizedTable} (\n${colDefs}\n)`;
+            if (dialect === 'mysql') createTable += ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
+            createTable += ';';
+
+            // INSERT statements
+            let insert = '';
+            const batchSize = 500;
+            const colList = headers.map(h => clientSanitizeName(h)).join(', ');
+            for (let i = 0; i < maxRows; i += batchSize) {
+                const batch = rows.slice(i, Math.min(i + batchSize, maxRows));
+                insert += `INSERT INTO ${sanitizedTable} (${colList}) VALUES\n`;
+                insert += batch.map(row =>
+                    `  (${headers.map(h => clientEscapeValue(row[h], columnTypes[h])).join(', ')})`
+                ).join(',\n') + ';\n\n';
+            }
+
+            if (rows.length > 10000) {
+                insert += `-- Note: Limited to first 10,000 rows.\n-- Your file contains ${rows.length.toLocaleString()} rows.\n`;
+            }
+
+            return { createTable, insert, rowCount: maxRows, columnCount: headers.length, dialect };
+        }
+
+        // Confirm and convert - fully client-side, no server call needed
+        function confirmAndConvert() {
             const tableName = document.getElementById('tableName').value || 'my_table';
             const dialect = document.getElementById('dialect').value;
 
-            // Collect type overrides
             const typeOverrides = {};
             document.querySelectorAll('.type-select').forEach(select => {
                 const columnName = select.dataset.column;
@@ -459,67 +533,47 @@
             document.getElementById('preview').style.display = 'none';
             document.getElementById('loading').style.display = 'block';
             document.getElementById('loadingMessage').textContent = 'Generating SQL statements...';
-            document.getElementById('loadingDetail').textContent = 'Creating optimized SQL for your database';
+            document.getElementById('loadingDetail').textContent = `Processing ${previewData.rowCount} rows client-side`;
             document.getElementById('error').style.display = 'none';
 
-            try {
-                const response = await fetch('/convert', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        tableName,
-                        dialect,
-                        typeOverrides,
-                        rows: previewData.rows,
-                        headers: previewData.headers
-                    })
-                });
+            // Use setTimeout to let the loading UI render before the heavy work
+            setTimeout(() => {
+                try {
+                    const data = generateSQLClientSide(
+                        tableName, dialect, typeOverrides,
+                        previewData.headers, previewData.rows
+                    );
 
-                const data = await response.json();
+                    currentSQL = { createTable: data.createTable, insert: data.insert };
 
-                if (!response.ok) {
-                    throw new Error(data.error || 'Conversion failed');
+                    document.getElementById('createTableSQL').textContent = data.createTable;
+                    document.getElementById('insertSQL').textContent = data.insert;
+
+                    const dialectNames = {
+                        'postgresql': 'PostgreSQL', 'mysql': 'MySQL',
+                        'sqlserver': 'SQL Server', 'sqlite': 'SQLite', 'oracle': 'Oracle'
+                    };
+                    document.getElementById('dialectUsed').textContent = dialectNames[data.dialect] || data.dialect;
+                    document.getElementById('rowCount').textContent = `${data.rowCount} rows`;
+                    document.getElementById('columnCount').textContent = `${data.columnCount} columns`;
+
+                    if (typeof gtag !== 'undefined') {
+                        gtag('event', 'conversion', {
+                            'database': data.dialect,
+                            'row_count': data.rowCount,
+                            'column_count': data.columnCount
+                        });
+                    }
+
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('results').style.display = 'block';
+
+                } catch (error) {
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('preview').style.display = 'block';
+                    showError(error.message, 'conversion');
                 }
-
-                // Store SQL for download
-                currentSQL = {
-                    createTable: data.createTable,
-                    insert: data.insert
-                };
-
-                // Display results
-                document.getElementById('createTableSQL').textContent = data.createTable;
-                document.getElementById('insertSQL').textContent = data.insert;
-                
-                // Format dialect name nicely
-                const dialectNames = {
-                    'postgresql': 'PostgreSQL',
-                    'mysql': 'MySQL',
-                    'sqlserver': 'SQL Server',
-                    'sqlite': 'SQLite',
-                    'oracle': 'Oracle'
-                };
-                document.getElementById('dialectUsed').textContent = `${dialectNames[data.dialect] || data.dialect}`;
-                document.getElementById('rowCount').textContent = `${data.rowCount} rows`;
-                document.getElementById('columnCount').textContent = `${data.columnCount} columns`;
-
-                // Track conversion in Google Analytics
-                if (typeof gtag !== 'undefined') {
-                    gtag('event', 'conversion', {
-                        'database': data.dialect,
-                        'row_count': data.rowCount,
-                        'column_count': data.columnCount
-                    });
-                }
-
-                document.getElementById('loading').style.display = 'none';
-                document.getElementById('results').style.display = 'block';
-
-            } catch (error) {
-                document.getElementById('loading').style.display = 'none';
-                document.getElementById('preview').style.display = 'block';
-                showError(error.message, 'conversion');
-            }
+            }, 50);
         }
 
         // Cancel preview and go back
