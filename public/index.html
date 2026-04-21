@@ -50,7 +50,21 @@
                         <li><strong>String Length</strong> - Warns if values exceed the detected VARCHAR size</li>
                         <li><strong>Primary Key Uniqueness</strong> - Flags duplicate values in ID/key columns</li>
                         <li><strong>Problem Row Report</strong> - Highlights rows most likely to break your INSERT</li>
+                        <li><strong>Schema Validation</strong> - Upload a JSON schema to validate types, nullability, max lengths, and numeric ranges</li>
                     </ul>
+                </div>
+
+                <div class="tips">
+                    <strong>📋 Schema JSON Format:</strong>
+                    <ul>
+                        <li>Create a <code>.json</code> file with your table's expected structure</li>
+                        <li>Supported constraints: <code>type</code>, <code>nullable</code>, <code>maxLength</code>, <code>min</code>, <code>max</code>, <code>primaryKey</code></li>
+                    </ul>
+                    <pre style="background:#0d1117; padding:10px; border-radius:4px; margin-top:10px; font-size:0.8em; overflow-x:auto;">{"table":"customers","columns":[
+  {"name":"id","type":"INTEGER","nullable":false,"primaryKey":true},
+  {"name":"email","type":"VARCHAR","maxLength":100,"nullable":false},
+  {"name":"balance","type":"DECIMAL","min":0,"max":999999}
+]}</pre>
                 </div>
                 
                 <div class="tips">
@@ -102,6 +116,16 @@
                         accept=".csv"
                         required
                     >
+                </div>
+
+                <div class="form-group">
+                    <label for="schemaFile">Schema JSON <span style="color:#484f58; font-weight:400;">(optional)</span></label>
+                    <label for="schemaFile" class="file-upload-label" style="padding: 20px;">
+                        <span id="schemaUploadText">📄 Upload schema .json to validate against</span>
+                        <span id="schemaFileName" class="file-name"></span>
+                    </label>
+                    <input type="file" id="schemaFile" name="schemaFile" accept=".json">
+                    <small class="help-text">Optional — define column types, nullability, max lengths, and numeric ranges to validate your CSV against a target schema.</small>
                 </div>
 
                 <button type="submit" id="convertBtn" class="btn-primary">
@@ -199,6 +223,7 @@
                 <p>→ Boolean Consistency</p>
                 <p>→ String Length Check</p>
                 <p>→ PK Uniqueness</p>
+                <p>→ Schema Validation</p>
                 <p>→ Problem Row Report</p>
             </div>
             <div class="footer-section">
@@ -234,6 +259,17 @@
         document.getElementById('csvFile').addEventListener('change', function(e) {
             const fileName = e.target.files[0]?.name || '';
             document.getElementById('fileName').textContent = fileName;
+        });
+
+        document.getElementById('schemaFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                document.getElementById('schemaUploadText').textContent = `📄 ${file.name}`;
+                document.getElementById('schemaFileName').textContent = 'Schema loaded';
+            } else {
+                document.getElementById('schemaUploadText').textContent = '📄 Upload schema .json to validate against';
+                document.getElementById('schemaFileName').textContent = '';
+            }
         });
 
         // Handle form submission - now shows preview first
@@ -333,6 +369,31 @@
             if (warningCount > 0) resultsDiv.appendChild(createValidationSection('Warnings', validation.warnings, 'warning'));
             if (infoCount > 0) resultsDiv.appendChild(createValidationSection('Info', validation.info, 'info'));
             if (passedCount > 0 && errorCount === 0 && warningCount === 0) resultsDiv.appendChild(createValidationSection('All Checks Passed', validation.passed, 'success'));
+
+            // Schema validation results
+            if (validation.schemaError) {
+                const errSection = document.createElement('div');
+                errSection.className = 'validation-section validation-error';
+                errSection.innerHTML = `<h4>⚠️ Schema Error</h4><ul class="validation-list"><li><div class="validation-message">${validation.schemaError}</div></ul>`;
+                resultsDiv.appendChild(errSection);
+            } else if (validation.schemaLoaded) {
+                const schemaLabel = validation.schemaTable ? ` — table: "${validation.schemaTable}"` : '';
+                const sErrCount = validation.schemaErrors?.length || 0;
+                const sWarnCount = validation.schemaWarnings?.length || 0;
+                const sPassCount = validation.schemaPassed?.length || 0;
+
+                const schemaBanner = document.createElement('div');
+                schemaBanner.className = `validation-summary ${sErrCount > 0 ? 'validation-error' : sWarnCount > 0 ? 'validation-warning' : 'validation-success'}`;
+                schemaBanner.innerHTML = `
+                    <h3>${sErrCount > 0 ? '❌' : sWarnCount > 0 ? '⚠️' : '✅'} Schema Validation${schemaLabel}</h3>
+                    <p>${sErrCount > 0 ? `${sErrCount} constraint violation${sErrCount>1?'s':''}` : sWarnCount > 0 ? `${sWarnCount} warning${sWarnCount>1?'s':''}` : 'All constraints satisfied'}${sPassCount > 0 ? ` &bull; ${sPassCount} check${sPassCount>1?'s':''} passed` : ''}</p>
+                `;
+                resultsDiv.appendChild(schemaBanner);
+
+                if (sErrCount > 0) resultsDiv.appendChild(createValidationSection('Schema Errors', validation.schemaErrors, 'error'));
+                if (sWarnCount > 0) resultsDiv.appendChild(createValidationSection('Schema Warnings', validation.schemaWarnings, 'warning'));
+                if (sPassCount > 0 && sErrCount === 0 && sWarnCount === 0) resultsDiv.appendChild(createValidationSection('Schema Checks Passed', validation.schemaPassed, 'success'));
+            }
 
             // Summary report: bad rows
             if (validation.summary && validation.summary.badRows && validation.summary.badRows.length > 0) {

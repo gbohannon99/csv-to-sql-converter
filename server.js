@@ -108,35 +108,45 @@ function sanitizeColumnName(name) {
 }
 
 // Preview endpoint - analyze CSV and return column info
-app.post('/preview', upload.single('csvFile'), (req, res) => {
+app.post('/preview', upload.fields([
+  { name: 'csvFile', maxCount: 1 },
+  { name: 'schemaFile', maxCount: 1 }
+]), (req, res) => {
   try {
-    const filePath = req.file.path;
-    const csvData = fs.readFileSync(filePath, 'utf8');
-    
-    // Clean up temp file immediately — we return the data in the response
-    try { fs.unlinkSync(filePath); } catch(e) {}
+    const csvFile = req.files['csvFile']?.[0];
+    if (!csvFile) return res.status(400).json({ error: 'No CSV file provided' });
+
+    const csvData = fs.readFileSync(csvFile.path, 'utf8');
+    try { fs.unlinkSync(csvFile.path); } catch(e) {}
+
+    // Parse optional schema file
+    let schema = null;
+    let schemaError = null;
+    const schemaFile = req.files['schemaFile']?.[0];
+    if (schemaFile) {
+      const schemaText = fs.readFileSync(schemaFile.path, 'utf8');
+      try { fs.unlinkSync(schemaFile.path); } catch(e) {}
+      const parsed = parseSchema(schemaText);
+      if (parsed.error) schemaError = parsed.error;
+      else schema = parsed;
+    }
 
     const parsed = Papa.parse(csvData, {
       header: true,
       skipEmptyLines: true,
       dynamicTyping: false
     });
-    
+
     if (parsed.errors.length > 0) {
       return res.status(400).json({ error: 'Error parsing CSV: ' + parsed.errors[0].message });
     }
-    
+
     const rows = parsed.data;
     const headers = parsed.meta.fields;
-    
-    if (!headers || headers.length === 0) {
-      return res.status(400).json({ error: 'No columns found in CSV' });
-    }
-    
-    if (rows.length === 0) {
-      return res.status(400).json({ error: 'No data rows found in CSV' });
-    }
-    
+
+    if (!headers || headers.length === 0) return res.status(400).json({ error: 'No columns found in CSV' });
+    if (rows.length === 0) return res.status(400).json({ error: 'No data rows found in CSV' });
+
     const columns = headers.map(header => {
       const columnValues = rows.map(row => row[header]);
       const detectedType = detectDataType(columnValues);
@@ -144,25 +154,36 @@ app.post('/preview', upload.single('csvFile'), (req, res) => {
       return {
         originalName: header,
         sanitizedName: sanitizeColumnName(header),
-        detectedType: detectedType,
+        detectedType,
         sampleValues: samples
       };
     });
-    
+
     const validationResults = runValidation(rows, headers);
-    
-    // Return rows + headers in response so convert doesn't need the temp file
+
+    // Run schema validation if schema was provided
+    if (schema) {
+      const schemaResults = runSchemaValidation(rows, headers, schema);
+      validationResults.schemaErrors = schemaResults.errors;
+      validationResults.schemaWarnings = schemaResults.warnings;
+      validationResults.schemaPassed = schemaResults.passed;
+      validationResults.schemaLoaded = true;
+      validationResults.schemaTable = schema.table || null;
+    }
+    if (schemaError) {
+      validationResults.schemaError = schemaError;
+    }
+
     res.json({
       columns,
       rowCount: rows.length,
-      headers,       // needed by convert
-      rows,          // needed by convert
+      headers,
+      rows,
       validation: validationResults
     });
-    
+
   } catch (error) {
     console.error('Error:', error);
-    if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch(e) {} }
     res.status(500).json({ error: 'Server error: ' + error.message });
   }
 });
@@ -351,6 +372,183 @@ function checkPrimaryKey(values, header) {
     details: `Duplicate values: ${examples}`,
     severity: 'error'
   };
+}
+
+
+// ── Phase 3: Schema validation ────────────────────────────────────────────────
+
+function parseSchema(schemaText) {
+  try {
+    const schema = JSON.parse(schemaText);
+    if (!schema.columns || !Array.isArray(schema.columns)) {
+      return { error: 'Schema must have a "columns" array' };
+    }
+    // Normalise column names to lowercase trimmed
+    schema.columns = schema.columns.map(col => ({
+      ...col,
+      name: col.name.trim().toLowerCase()
+    }));
+    return schema;
+  } catch (e) {
+    return { error: 'Invalid JSON: ' + e.message };
+  }
+}
+
+function runSchemaValidation(rows, headers, schema) {
+  const issues = { errors: [], warnings: [], passed: [] };
+  const csvCols = new Set(headers.map(h => h.trim().toLowerCase()));
+  const schemaCols = new Map(schema.columns.map(c => [c.name, c]));
+
+  // 1. Missing columns — in schema but not in CSV
+  schema.columns.forEach(col => {
+    if (!csvCols.has(col.name)) {
+      issues.errors.push({
+        type: 'schema_missing_column',
+        message: `Required column "${col.name}" is in schema but missing from CSV`,
+        severity: 'error'
+      });
+    }
+  });
+
+  // 2. Extra columns — in CSV but not in schema
+  headers.forEach(h => {
+    const norm = h.trim().toLowerCase();
+    if (!schemaCols.has(norm)) {
+      issues.warnings.push({
+        type: 'schema_extra_column',
+        message: `Column "${h}" is in CSV but not defined in schema`,
+        severity: 'warning'
+      });
+    }
+  });
+
+  // Per-column schema checks
+  headers.forEach(header => {
+    const norm = header.trim().toLowerCase();
+    const col = schemaCols.get(norm);
+    if (!col) return; // extra column, already flagged
+
+    const values = rows.map(row => row[header]);
+    const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '');
+
+    // 3. Nullable check (schema-driven, more precise than Phase 1)
+    if (col.nullable === false) {
+      const nullCount = values.length - nonEmpty.length;
+      if (nullCount > 0) {
+        issues.errors.push({
+          type: 'schema_not_nullable',
+          column: header,
+          message: `Column "${header}" is NOT NULL in schema but has ${nullCount} empty value(s)`,
+          severity: 'error'
+        });
+      }
+    }
+
+    // 4. Type compatibility check
+    if (col.type) {
+      const schemaType = col.type.toUpperCase();
+      const detectedType = detectDataType(values).toUpperCase();
+
+      const typeCompatible = () => {
+        if (schemaType === 'INTEGER' || schemaType === 'INT' || schemaType === 'BIGINT') {
+          return detectedType === 'INTEGER';
+        }
+        if (schemaType === 'DECIMAL' || schemaType === 'NUMERIC' || schemaType === 'FLOAT' || schemaType === 'REAL') {
+          return detectedType === 'INTEGER' || detectedType.startsWith('DECIMAL');
+        }
+        if (schemaType === 'DATE' || schemaType === 'DATETIME' || schemaType === 'TIMESTAMP') {
+          return detectedType === 'DATE';
+        }
+        if (schemaType === 'VARCHAR' || schemaType === 'TEXT' || schemaType === 'CHAR') {
+          return true; // anything can be a string
+        }
+        if (schemaType === 'BOOLEAN') {
+          const uniqueVals = new Set(nonEmpty.map(v => String(v).toLowerCase().trim()));
+          return [...uniqueVals].every(v => BOOL_SETS.some(s => s.has(v)));
+        }
+        return true;
+      };
+
+      if (!typeCompatible()) {
+        issues.errors.push({
+          type: 'schema_type_mismatch',
+          column: header,
+          message: `Column "${header}" schema type is ${col.type} but data looks like ${detectedType}`,
+          details: `Check that the column contains the right data for a ${col.type} field`,
+          severity: 'error'
+        });
+      }
+    }
+
+    // 5. maxLength check (schema-driven, exact limit)
+    if (col.maxLength && (col.type || '').toUpperCase().includes('VARCHAR') || col.maxLength) {
+      const overLimit = nonEmpty.filter(v => String(v).length > col.maxLength);
+      if (overLimit.length > 0) {
+        const worst = overLimit.reduce((a, b) => String(a).length > String(b).length ? a : b);
+        issues.errors.push({
+          type: 'schema_max_length',
+          column: header,
+          message: `Column "${header}" has ${overLimit.length} value(s) exceeding schema maxLength of ${col.maxLength}`,
+          details: `Longest: ${String(worst).length} chars — "${String(worst).substring(0, 60)}${String(worst).length > 60 ? '...' : ''}"`,
+          severity: 'error'
+        });
+      }
+    }
+
+    // 6. Numeric range check (min/max)
+    if (col.min !== undefined || col.max !== undefined) {
+      const numericVals = nonEmpty.map(v => parseFloat(String(v).replace(/,/g, '')));
+      const validNums = numericVals.filter(n => !isNaN(n));
+
+      if (validNums.length > 0) {
+        const outOfRange = [];
+        validNums.forEach((n, i) => {
+          if ((col.min !== undefined && n < col.min) || (col.max !== undefined && n > col.max)) {
+            outOfRange.push(n);
+          }
+        });
+
+        if (outOfRange.length > 0) {
+          const range = [col.min !== undefined ? `min: ${col.min}` : null, col.max !== undefined ? `max: ${col.max}` : null].filter(Boolean).join(', ');
+          issues.errors.push({
+            type: 'schema_range',
+            column: header,
+            message: `Column "${header}" has ${outOfRange.length} value(s) outside allowed range (${range})`,
+            details: `Examples: ${outOfRange.slice(0, 3).join(', ')}`,
+            severity: 'error'
+          });
+        }
+      }
+    }
+
+    // 7. Primary key uniqueness (schema-driven)
+    if (col.primaryKey === true) {
+      const seen = new Set();
+      const dupes = [];
+      nonEmpty.forEach(v => {
+        const key = String(v).trim();
+        if (seen.has(key)) dupes.push(key);
+        else seen.add(key);
+      });
+      if (dupes.length > 0) {
+        issues.errors.push({
+          type: 'schema_pk_uniqueness',
+          column: header,
+          message: `Column "${header}" is the primary key but has ${dupes.length} duplicate value(s)`,
+          details: `Duplicates: ${[...new Set(dupes)].slice(0, 3).map(v => `"${v}"`).join(', ')}`,
+          severity: 'error'
+        });
+      } else {
+        issues.passed.push({ type: 'schema_pk_ok', message: `Primary key "${header}" — all values unique ✓` });
+      }
+    }
+  });
+
+  if (issues.errors.length === 0 && issues.warnings.length === 0) {
+    issues.passed.push({ type: 'schema_overall', message: 'All schema constraints satisfied! 🎉' });
+  }
+
+  return issues;
 }
 
 
