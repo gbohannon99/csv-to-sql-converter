@@ -172,6 +172,7 @@ function checkPrimaryKey(values, header) {
 }
 
 
+function buildSummaryReport(rows, headers, allIssues) {
   const colSummary = {};
   allIssues.forEach(issue => { if (issue.column) { if (!colSummary[issue.column]) colSummary[issue.column]=[]; colSummary[issue.column].push(issue.type); } });
   const badRows = [];

@@ -354,6 +354,7 @@ function checkPrimaryKey(values, header) {
 }
 
 
+function buildSummaryReport(rows, headers, allIssues) {
   const colSummary = {};
   allIssues.forEach(issue => {
     if (issue.column) {
@@ -362,7 +363,6 @@ function checkPrimaryKey(values, header) {
     }
   });
 
-  // Find rows that will likely break an INSERT (nulls in multiple cols, whitespace on IDs)
   const badRows = [];
   rows.slice(0, 5000).forEach((row, idx) => {
     const problems = [];
@@ -372,7 +372,7 @@ function checkPrimaryKey(values, header) {
       else if (String(v) !== String(v).trim()) problems.push(`${h}: whitespace`);
     });
     if (problems.length >= Math.ceil(headers.length * 0.3)) {
-      badRows.push({ rowNum: idx + 2, problems: problems.slice(0, 4) }); // +2 for 1-index + header
+      badRows.push({ rowNum: idx + 2, problems: problems.slice(0, 4) });
     }
   });
 
