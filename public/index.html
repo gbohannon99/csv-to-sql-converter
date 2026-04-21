@@ -47,6 +47,8 @@
                         <li><strong>Boolean Consistency</strong> - Detects mixed true/false, 0/1, Y/N representations</li>
                         <li><strong>Mixed Date Formats</strong> - Catches YYYY-MM-DD vs DD/MM/YYYY in the same column</li>
                         <li><strong>Invalid Dates</strong> - Flags unparseable date values</li>
+                        <li><strong>String Length</strong> - Warns if values exceed the detected VARCHAR size</li>
+                        <li><strong>Primary Key Uniqueness</strong> - Flags duplicate values in ID/key columns</li>
                         <li><strong>Problem Row Report</strong> - Highlights rows most likely to break your INSERT</li>
                     </ul>
                 </div>
@@ -195,6 +197,8 @@
                 <p>→ Invalid/Mixed Dates</p>
                 <p>→ NULL Analysis</p>
                 <p>→ Boolean Consistency</p>
+                <p>→ String Length Check</p>
+                <p>→ PK Uniqueness</p>
                 <p>→ Problem Row Report</p>
             </div>
             <div class="footer-section">

@@ -302,8 +302,58 @@ function checkDateFormats(values, header) {
   return issues;
 }
 
-// Summary report: per-column error counts + first N bad rows
-function buildSummaryReport(rows, headers, allIssues) {
+// ── Phase 2 helpers ──────────────────────────────────────────────────────────
+
+// Max string length check — warn if values will be truncated by detected VARCHAR size
+function checkStringLength(values, header, detectedType) {
+  if (!detectedType.startsWith('VARCHAR')) return null;
+  const sizeMatch = detectedType.match(/\((\d+)\)/);
+  if (!sizeMatch) return null;
+  const maxLen = parseInt(sizeMatch[1]);
+
+  const overLimit = values.filter(v => v !== null && v !== undefined && v !== '' && String(v).length > maxLen);
+  if (overLimit.length === 0) return null;
+
+  const worst = overLimit.reduce((a, b) => String(a).length > String(b).length ? a : b);
+  return {
+    type: 'string_length',
+    column: header,
+    message: `Column "${header}" has ${overLimit.length} value(s) exceeding detected ${detectedType} limit (${maxLen} chars)`,
+    details: `Longest value: ${String(worst).length} chars — "${String(worst).substring(0, 60)}${String(worst).length > 60 ? '...' : ''}"`,
+    severity: 'warning'
+  };
+}
+
+// Primary key uniqueness check — flag columns that look like PKs but have duplicates
+function checkPrimaryKey(values, header) {
+  // Only run on columns whose name suggests a PK
+  const pkPattern = /^(id|.*_id|.*_key|.*_pk|record_id|uuid|guid)$/i;
+  if (!pkPattern.test(header.trim())) return null;
+
+  const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '');
+  if (nonEmpty.length === 0) return null;
+
+  const seen = new Set();
+  const dupes = [];
+  nonEmpty.forEach((v, idx) => {
+    const key = String(v).trim();
+    if (seen.has(key)) dupes.push(key);
+    else seen.add(key);
+  });
+
+  if (dupes.length === 0) return null;
+
+  const examples = [...new Set(dupes)].slice(0, 3).map(v => `"${v}"`).join(', ');
+  return {
+    type: 'pk_uniqueness',
+    column: header,
+    message: `Column "${header}" looks like a primary key but has ${dupes.length} duplicate value(s)`,
+    details: `Duplicate values: ${examples}`,
+    severity: 'error'
+  };
+}
+
+
   const colSummary = {};
   allIssues.forEach(issue => {
     if (issue.column) {
@@ -390,6 +440,15 @@ function runValidation(rows, headers) {
       else results.warnings.push(issue);
       allIssues.push(issue);
     });
+
+    // 7. String length vs detected VARCHAR size
+    const detectedType = detectDataType(values);
+    const lenIssue = checkStringLength(nonEmpty, header, detectedType);
+    if (lenIssue) { results.warnings.push(lenIssue); allIssues.push(lenIssue); }
+
+    // 8. Primary key uniqueness
+    const pkIssue = checkPrimaryKey(values, header);
+    if (pkIssue) { results.errors.push(pkIssue); allIssues.push(pkIssue); }
   });
 
   // 7. Build summary report

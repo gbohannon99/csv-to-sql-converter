@@ -136,7 +136,42 @@ function checkDateFormats(values, header) {
   return issues;
 }
 
-function buildSummaryReport(rows, headers, allIssues) {
+// ── Phase 2 helpers ──────────────────────────────────────────────────────────
+
+function checkStringLength(values, header, detectedType) {
+  if (!detectedType.startsWith('VARCHAR')) return null;
+  const sizeMatch = detectedType.match(/\((\d+)\)/);
+  if (!sizeMatch) return null;
+  const maxLen = parseInt(sizeMatch[1]);
+  const overLimit = values.filter(v => v !== null && v !== undefined && v !== '' && String(v).length > maxLen);
+  if (overLimit.length === 0) return null;
+  const worst = overLimit.reduce((a, b) => String(a).length > String(b).length ? a : b);
+  return {
+    type: 'string_length', column: header,
+    message: `Column "${header}" has ${overLimit.length} value(s) exceeding detected ${detectedType} limit (${maxLen} chars)`,
+    details: `Longest value: ${String(worst).length} chars — "${String(worst).substring(0, 60)}${String(worst).length > 60 ? '...' : ''}"`,
+    severity: 'warning'
+  };
+}
+
+function checkPrimaryKey(values, header) {
+  const pkPattern = /^(id|.*_id|.*_key|.*_pk|record_id|uuid|guid)$/i;
+  if (!pkPattern.test(header.trim())) return null;
+  const nonEmpty = values.filter(v => v !== null && v !== undefined && v !== '');
+  if (nonEmpty.length === 0) return null;
+  const seen = new Set(); const dupes = [];
+  nonEmpty.forEach(v => { const key = String(v).trim(); if (seen.has(key)) dupes.push(key); else seen.add(key); });
+  if (dupes.length === 0) return null;
+  const examples = [...new Set(dupes)].slice(0, 3).map(v => `"${v}"`).join(', ');
+  return {
+    type: 'pk_uniqueness', column: header,
+    message: `Column "${header}" looks like a primary key but has ${dupes.length} duplicate value(s)`,
+    details: `Duplicate values: ${examples}`,
+    severity: 'error'
+  };
+}
+
+
   const colSummary = {};
   allIssues.forEach(issue => { if (issue.column) { if (!colSummary[issue.column]) colSummary[issue.column]=[]; colSummary[issue.column].push(issue.type); } });
   const badRows = [];
@@ -165,6 +200,10 @@ function runValidation(rows, headers) {
     const nullIssue = checkNulls(values, header); if (nullIssue) { if (nullIssue.severity==='warning') results.warnings.push(nullIssue); else results.info.push(nullIssue); allIssues.push(nullIssue); }
     const boolIssue = checkBoolean(nonEmpty, header); if (boolIssue) { results.warnings.push(boolIssue); allIssues.push(boolIssue); }
     const dateIssues = checkDateFormats(nonEmpty, header); dateIssues.forEach(issue => { if (issue.severity==='error') results.errors.push(issue); else results.warnings.push(issue); allIssues.push(issue); });
+    // Phase 2
+    const detectedType = detectDataType(values);
+    const lenIssue = checkStringLength(nonEmpty, header, detectedType); if (lenIssue) { results.warnings.push(lenIssue); allIssues.push(lenIssue); }
+    const pkIssue = checkPrimaryKey(values, header); if (pkIssue) { results.errors.push(pkIssue); allIssues.push(pkIssue); }
   });
   results.summary = buildSummaryReport(rows, headers, allIssues);
   if (results.warnings.length===0 && results.errors.length===0) results.passed.push({ type: 'overall', message: 'No data quality issues detected! 🎉' });
